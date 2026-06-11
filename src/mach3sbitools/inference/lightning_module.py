@@ -271,25 +271,24 @@ class SBILightningModule(L.LightningModule):
 
     def configure_optimizers(self):
         """Adam + ReduceLROnPlateau scheduler monitoring ``val/ema_loss``."""
-        return torch.optim.Adam(
+        optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=1e-5,
         )
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer,
-        #     patience=self.config.scheduler_patience,
-        #     factor=0.5,
-        #     min_lr=1e-8,
-        # )
-        # return {
-        #     "optimizer": optimizer,
-        #     "lr_scheduler": {
-        #         "scheduler": scheduler,
-        #         "monitor": "val/ema_loss",
-        #     },
-        # }
-        # return optimizer
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            patience=self.config.scheduler_patience,
+            factor=0.5,
+            min_lr=1e-8,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val/ema_loss",
+            },
+        }
 
     # ── Checkpoint ────────────────────────────────────────────────────────────
     def on_save_checkpoint(self, checkpoint: dict) -> None:

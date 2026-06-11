@@ -51,7 +51,6 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.strategies import ModelParallelStrategy
-from lightning.pytorch.tuner import Tuner
 from sbi.inference import NPE, DirectPosterior
 from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParameters
 from sbi.neural_nets import posterior_nn
@@ -220,39 +219,34 @@ def _strip_compiled_prefix(state_dict: dict) -> dict:
 
 
 def _infer_dims_from_state_dict(state_dict: dict, theta_dim: int) -> tuple[int, int]:
-    """
-    Infer x_dim from the first hyper-network weight in a Zuko flow.
-    The hyper-network takes x directly as context, so its input dim == x_dim.
-    """
-    # hyper_keys = sorted(
-    #     k for k in state_dict
-    #     if "hyper.0.weight" in k
-    # )
-
-    # if hyper_keys:
-    #     x_dim = state_dict[hyper_keys[0]].shape[1]
-    #     logger.debug(f"Inferred x_dim={x_dim} from '{hyper_keys[0]}'")
-    #     return theta_dim, x_dim
-
-    # # Fallback for non-zuko architectures with an embedding net
-    # embedding_keys = sorted(
-    #     k for k in state_dict
-    #     if "_embedding_net" in k and state_dict[k].ndim == 2
-    # )
-    # if embedding_keys:
-    #     x_dim = state_dict[embedding_keys[0]].shape[1]
-    #     logger.debug(f"Inferred x_dim={x_dim} from '{embedding_keys[0]}'")
-    #     return theta_dim, x_dim
-
-    # raise ValueError(
-    #     "Could not infer x_dim from checkpoint state dict. "
-    #     "The checkpoint may be corrupt or from an incompatible sbi version. "
-    #     f"Available keys: {list(state_dict.keys())}"
-    # )
-    get_logger().warning(
-        "CURRENTLY X_DIM IS HARDCODED TO 68 — THIS IS A TEMPORARY HACK FOR TESTING! PLEASE FiX"
+    embedding_keys = sorted(
+        k for k in state_dict if "_embedding_net" in k and state_dict[k].ndim == 2
     )
-    return theta_dim, 68
+    if embedding_keys:
+        x_dim = state_dict[embedding_keys[0]].shape[1]
+        logger.debug(
+            f"Inferred x_dim={x_dim} from embedding net key '{embedding_keys[0]}'"
+        )
+        return theta_dim, x_dim
+
+    hyper_keys = sorted(
+        k for k in state_dict if "hyper.0.weight" in k and state_dict[k].ndim == 2
+    )
+    if hyper_keys:
+        # Zuko hyper net input is x_dim + theta_dim (context is concatenated)
+        combined_dim = state_dict[hyper_keys[0]].shape[1]
+        x_dim = combined_dim - theta_dim
+        logger.debug(
+            f"Inferred x_dim={x_dim} from hyper net key '{hyper_keys[0]}' "
+            f"(combined_dim={combined_dim} - theta_dim={theta_dim})"
+        )
+        return theta_dim, x_dim
+
+    raise ValueError(
+        "Could not infer x_dim from checkpoint state dict.\n"
+        "Expected either '_embedding_net' keys or 'hyper.0.weight' keys.\n"
+        f"Available keys (first 20): {list(state_dict.keys())[:20]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +294,7 @@ def _build_trainer(config: TrainingConfig) -> lightning.Trainer:
         callbacks=_build_callbacks(config),
         logger=tb_logger,
         precision="bf16-mixed" if config.use_amp else "32-true",
-        gradient_clip_val=1.0,
+        gradient_clip_val=20.0,
         enable_progress_bar=config.show_progress,
         log_every_n_steps=50,
         strategy=strat,
@@ -513,11 +507,13 @@ class InferenceHandler:
         data_module = SBIDataModule(self._tensor_dataset, config)
         trainer = _build_trainer(config)
 
+        # TODO: Uncomment when lightning allows for ddp batched training and LR with multiple optimizers
+        # Currently LR decay is more effective than finding the perfect initial LR
+
         # Set up tuning to get good initial LR + batch size that uses the optimal amount of memory!
-        tuner = Tuner(trainer)
-        # TODO: Uncomment when lightning allows for ddp batched training
+        # tuner = Tuner(trainer)
         # tuner.scale_batch_size(lightning_module, mode="power", datamodule=data_module)
-        tuner.lr_find(lightning_module, datamodule=data_module)
+        # tuner.lr_find(lightning_module, datamodule=data_module)
 
         trainer.fit(lightning_module, datamodule=data_module, ckpt_path=ckpt_path)
 

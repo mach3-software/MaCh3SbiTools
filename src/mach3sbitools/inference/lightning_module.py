@@ -129,10 +129,6 @@ class SBILightningModule(L.LightningModule):
         return loss
 
     def on_train_epoch_end(self) -> None:
-        """
-        Log throughput, GPU memory, and (every N epochs) gradient and weight
-        statistics.
-        """
         elapsed = time.perf_counter() - self._epoch_start_time
         do_expensive = self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS == 0
 
@@ -154,8 +150,7 @@ class SBILightningModule(L.LightningModule):
             sync_dist=True,
         )
 
-        # ── Learning rate ────────────────────────────────────w─────────────
-
+        # ── Learning rate ─────────────────────────────────────────────────
         for i, pg in enumerate(self.optimizers().param_groups):  # type: ignore
             self.log(f"optim/lr_group_{i}", pg["lr"], sync_dist=True)
 
@@ -168,28 +163,33 @@ class SBILightningModule(L.LightningModule):
             self.log("gpu/reserved_mb", reserved, sync_dist=True)
             self.log("gpu/memory_pressure", allocated / total, sync_dist=True)
 
-        # ── Expensive: gradient and weight statistics ─────────────────────
+        # ── Expensive: weight statistics ──────────────────────────────────
         if do_expensive:
-            total_grad_norm_sq = 0.0
             total_param_norm_sq = 0.0
-
             for name, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
-
-                # Weight statistics
-                self.log(f"weights/{name}/std", p.data.std(), sync_dist=True)
-                self.log(f"weights/{name}/max_abs", p.data.abs().max(), sync_dist=True)
+                self.log(f"weights/{name}/std", p.data.std(), rank_zero_only=True)
+                self.log(
+                    f"weights/{name}/max_abs", p.data.abs().max(), rank_zero_only=True
+                )
                 total_param_norm_sq += p.data.norm(2).item() ** 2
+            self.log("train/param_norm", total_param_norm_sq**0.5, rank_zero_only=True)
 
-                # Gradient statistics
-                if p.grad is not None:
-                    layer_grad_norm = p.grad.data.norm(2).item()
-                    total_grad_norm_sq += layer_grad_norm**2
-                    self.log(f"grad_norms/{name}", layer_grad_norm, sync_dist=True)
+    def on_before_optimizer_step(self, optimizer) -> None:
+        """Capture gradient norms before the optimizer step clears them."""
+        if self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0:
+            return
 
-            self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=True)
-            self.log("train/param_norm", total_param_norm_sq**0.5, sync_dist=True)
+        total_grad_norm_sq = 0.0
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad or p.grad is None:
+                continue
+            layer_grad_norm = p.grad.data.norm(2).item()
+            total_grad_norm_sq += layer_grad_norm**2
+            self.log(f"grad_norms/{name}", layer_grad_norm, rank_zero_only=True)
+
+        self.log("train/grad_norm", total_grad_norm_sq**0.5, rank_zero_only=True)
 
     # ── Validation ────────────────────────────────────────────────────────────
 

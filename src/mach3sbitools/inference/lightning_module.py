@@ -2,8 +2,6 @@
 PyTorch Lightning module for SBI density estimator training.
 """
 
-from __future__ import annotations
-
 import time
 
 import lightning as L
@@ -106,6 +104,7 @@ class SBILightningModule(L.LightningModule):
         :param batch_idx: Index of the current batch.
         :returns: Scalar mean loss.
         """
+
         theta, x = batch
         loss_per_sample = self.model.loss(theta, x)
         loss = loss_per_sample.mean()
@@ -294,11 +293,10 @@ class SBILightningModule(L.LightningModule):
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         """Embed model weights, architecture config, and epoch into checkpoint."""
         checkpoint["model_state"] = self.model.state_dict()
-        if self.model_config is not None:
-            checkpoint["model_config"] = self.model_config
+        checkpoint["model_config"] = self.model_config
         checkpoint["epoch"] = self.current_epoch
-        checkpoint["theta_dim"] = next(
-            p.shape[0]
-            for name, p in self.model.named_parameters()
-            if "output_layer" in name or name.endswith(".weight")
-        )
+
+        # Lets us load everything from a single checkpoint
+
+        checkpoint["theta_dim"] = self.model.input_shape[0]
+        checkpoint["x_dim"] = self.model.condition_shape[0]

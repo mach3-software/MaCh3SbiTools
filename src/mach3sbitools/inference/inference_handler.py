@@ -31,6 +31,11 @@ from sbi.neural_nets import posterior_nn
 from torch.utils.data import TensorDataset
 
 from mach3sbitools.data_loaders import ParaketDataset, SBIDataModule
+from mach3sbitools.data_processors import (
+    CompressorBase,
+    compressor_factory,
+    restore_compressor,
+)
 from mach3sbitools.simulator import load_prior
 from mach3sbitools.types import SimulatorData
 
@@ -91,6 +96,10 @@ class InferenceHandler:
         self._density_estimator: nn.Module | None = None
         self._tensor_dataset: TensorDataset | None = None
 
+        # Compression for X/Theta
+        self._theta_compressor: CompressorBase | None = None
+        self._x_compressor: CompressorBase | None = None
+
     def set_dataset(self, data_folder: Path) -> None:
         """
         Point the handler at a folder of ``.feather`` simulation files.
@@ -111,6 +120,42 @@ class InferenceHandler:
         self._tensor_dataset = self.dataset.to_tensor_dataset(
             device="cpu", verbose=verbose
         )
+        for t in self._tensor_dataset.tensors:
+            t.share_memory_()
+
+    def fit_x_compressor(self, compressor: str, **kwargs):
+        """
+        Compress X dim
+        """
+
+        if self._tensor_dataset is None:
+            raise ValueError("call load_training_data before fitting compressor")
+
+        _, x = self._tensor_dataset.tensors
+        self._x_compressor = compressor_factory(compressor, **kwargs).fit(x)
+        logger.info(f"Fitted x with {compressor}")
+
+    def fit_theta_compressor(self, compressor: str, **kwargs):
+        """
+        Compress theta dim
+        """
+        if self._tensor_dataset is None:
+            raise ValueError("call load_training_data before fitting compressor")
+
+        theta, _ = self._tensor_dataset.tensors
+        self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
+        logger.info(f"Fitted theta with {compressor}")
+
+    def apply_compression(self) -> None:
+        if self._tensor_dataset is None:
+            raise ValueError("call load_training_data before fitting compressor")
+
+        theta, x = self._tensor_dataset.tensors
+        if self._theta_compressor:
+            theta = self._theta_compressor.transform(theta)
+        if self._x_compressor:
+            x = self._x_compressor.transform(x)
+
         for t in self._tensor_dataset.tensors:
             t.share_memory_()
 
@@ -267,10 +312,18 @@ class InferenceHandler:
         if self.posterior is None:
             raise ValueError("Train or load a density estimator first.")
         x_tensor = self.device_handler.to_tensor(x).to(self.prior.device_handler.device)
-        return cast(
+
+        if self._x_compressor is not None:
+            x_tensor = self._x_compressor.transform(x_tensor)
+
+        samples = cast(
             torch.Tensor,
             self.posterior.sample((num_samples,), x=x_tensor, **kwargs),
         )
+
+        if self._theta_compressor:
+            samples = self._theta_compressor.inverse_transform(samples)
+        return samples
 
     def get_log_likelihood(
         self, theta: SimulatorData, x: list[float] | np.ndarray, **kwargs
@@ -291,6 +344,12 @@ class InferenceHandler:
         theta_tensor = torch.tensor(
             np.array(theta), dtype=torch.float32, device=self.device_handler.device
         )
+
+        if self._x_compressor:
+            x_tensor = self._x_compressor.transform(x_tensor)
+        if self._theta_compressor:
+            theta_tensor = self._theta_compressor.transform(theta_tensor)
+
         return cast(
             torch.Tensor,
             cast(DirectPosterior, self.posterior).log_prob(
@@ -301,7 +360,6 @@ class InferenceHandler:
     # ================================================
     # Loading
     # ================================================
-
     def load_posterior(self, checkpoint_path: Path):
         """
         Load a trained density estimator from a checkpoint for **inference only**.
@@ -334,6 +392,12 @@ class InferenceHandler:
             torch.zeros(2, loader.x_dim, device=device),
         )
         density_estimator.load_state_dict(loader.state_dict)
+
+        if x_comp := loader.x_compressor:
+            self._x_compressor = restore_compressor(x_comp)
+
+        if theta_comp := loader.theta_compressor:
+            self._theta_compressor = restore_compressor(theta_comp)
 
         density_estimator.to(device).eval()
         self._density_estimator = density_estimator

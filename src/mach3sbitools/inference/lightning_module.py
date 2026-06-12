@@ -8,6 +8,7 @@ import lightning as L
 import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
 
+from mach3sbitools.data_processors import CompressorBase
 from mach3sbitools.utils.config import PosteriorConfig, TrainingConfig
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
@@ -52,6 +53,8 @@ class SBILightningModule(L.LightningModule):
         density_estimator: ConditionalEstimator,
         config: TrainingConfig,
         model_config: PosteriorConfig | None = None,
+        x_compressor: CompressorBase | None = None,
+        theta_compressor: CompressorBase | None = None,
     ):
         """
         :param density_estimator: The ``sbi`` density estimator to train.
@@ -76,6 +79,9 @@ class SBILightningModule(L.LightningModule):
         # Throughput state
         self._epoch_start_time: float = 0.0
         self._train_samples_seen: int = 0
+
+        self._x_compressor = x_compressor
+        self._theta_compressor = theta_compressor
 
     # ── Forward ───────────────────────────────────────────────────────────────
 
@@ -299,4 +305,11 @@ class SBILightningModule(L.LightningModule):
         # Lets us load everything from a single checkpoint
 
         checkpoint["theta_dim"] = self.model.input_shape[0]
+        checkpoint["theta_compressor"] = (
+            self._theta_compressor.state_dict() if self._theta_compressor else None
+        )
+
         checkpoint["x_dim"] = self.model.condition_shape[0]
+        checkpoint["x_compressor"] = (
+            self._x_compressor.state_dict() if self._x_compressor else None
+        )

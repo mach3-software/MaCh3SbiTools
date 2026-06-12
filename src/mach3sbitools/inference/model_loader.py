@@ -82,3 +82,11 @@ class ModelLoader:
     @property
     def state_dict(self):
         return _strip_compiled_prefix(self._checkpoint_dict["model_state"])
+
+    @property
+    def x_compressor(self) -> dict | None:
+        return self._checkpoint_dict["x_compressor"]
+
+    @property
+    def theta_compressor(self) -> dict | None:
+        return self._checkpoint_dict["theta_compressor"]

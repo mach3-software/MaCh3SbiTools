@@ -168,6 +168,24 @@ class InferenceHandler:
         density_estimator = self._build_density_estimator_from_inference()
         self._fit(density_estimator, config, model_config, ckpt_path=None)
 
+    def resume_training(
+        self,
+        checkpoint_path: Path,
+        config: TrainingConfig,
+    ) -> None:
+        model_loader = ModelLoader(checkpoint_path)
+
+        self._load_posterior(model_loader)
+
+        assert self._density_estimator is not None
+
+        self._fit(
+            self._density_estimator,
+            config,
+            model_loader.model_config,
+            str(checkpoint_path),
+        )
+
     # ================================================
     # Internal Methods
     # ================================================
@@ -300,8 +318,11 @@ class InferenceHandler:
 
         loader = ModelLoader(checkpoint_path)
 
-        self.create_posterior(loader.model_config)
+        self._load_posterior(loader)
+        logger.info(f"Density estimator loaded from [cyan]{checkpoint_path}[/]")
 
+    def _load_posterior(self, loader: ModelLoader):
+        self.create_posterior(loader.model_config)
         if loader.theta_dim != len(self.parameter_names):
             raise ValueError(
                 f"Total number of parameters ({len(self.parameter_names)})!=theta_dim in checkpoint ({loader.theta_dim})"
@@ -316,7 +337,6 @@ class InferenceHandler:
 
         density_estimator.to(device).eval()
         self._density_estimator = density_estimator
-        logger.info(f"Density estimator loaded from [cyan]{checkpoint_path}[/]")
 
     # ================================================
     # Builders

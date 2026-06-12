@@ -19,7 +19,7 @@ import fnmatch
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 import numpy as np
 import torch
@@ -347,8 +347,11 @@ class Prior(torch.distributions.Distribution):
             def check(self_, value: torch.Tensor) -> torch.Tensor:
                 # check_bounds expects (n_samples, n_params) so unsqueeze if needed
                 if value.dim() == 1:
-                    return self_._prior.check_bounds(value.unsqueeze(0)).squeeze(0)
-                return self_._prior.check_bounds(value)
+                    return cast(
+                        torch.Tensor,
+                        self_._prior.check_bounds(value.unsqueeze(0)).squeeze(0),
+                    )
+                return cast(torch.Tensor, self_._prior.check_bounds(value))
 
         return CheckBoundsConstraint(self)
 

@@ -73,8 +73,8 @@ class PCACompressor(CompressorBase):
         if not self.is_fitted:
             raise RuntimeError("PCACompressor must be fitted before transform.")
 
-        if self.components is None:
-            raise RuntimeError("No components found!")
+        assert self.components is not None
+        assert self.mean is not None
 
         data, squeezed = self._unsqueeze_if_1d(data.float())
         out = (data - self.mean) @ self.components.T
@@ -83,6 +83,10 @@ class PCACompressor(CompressorBase):
     def inverse_transform(self, data: torch.Tensor) -> torch.Tensor:
         if not self.is_fitted:
             raise RuntimeError("PCACompressor must be fitted before inverse_transform.")
+
+        assert self.components is not None
+        assert self.mean is not None
+
         data, squeezed = self._unsqueeze_if_1d(data.float())
         out = data @ self.components + self.mean
         return self._squeeze_if_needed(out, squeezed)

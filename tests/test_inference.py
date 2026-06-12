@@ -227,6 +227,8 @@ class TestInferenceHandlerCheckpoints:
                 "model_config": posterior_config,
                 "theta_dim": theta_dim,
                 "x_dim": 12,
+                "x_compressor": None,
+                "theta_compressor": None,
             },
             ckpt_path,
         )

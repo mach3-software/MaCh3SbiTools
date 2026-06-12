@@ -13,7 +13,9 @@ class ModelState(TypedDict):
     model_config: PosteriorConfig
     epoch: int
     theta_dim: int
+    theta_compressor: dict | None
     x_dim: int
+    x_compressor: dict | None
 
 
 def select_accelerator_and_strategy(

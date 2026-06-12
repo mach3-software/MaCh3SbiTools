@@ -104,16 +104,6 @@ class TestInferenceHandlerErrorPaths:
         with pytest.raises(FileNotFoundError):
             InferenceHandler(prior_save).load_posterior(Path("/no/such/checkpoint.pt"))
 
-    def test_load_posterior_plain_state_dict_requires_config(
-        self, prior_save, tmp_path
-    ):
-        ckpt_path = tmp_path / "plain.pt"
-        torch.save({"some_key": torch.zeros(1)}, ckpt_path)
-        with pytest.raises(ValueError, match="model_config"):
-            InferenceHandler(prior_save).load_posterior(
-                ckpt_path, posterior_config=None
-            )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Happy path — training lifecycle
@@ -235,48 +225,12 @@ class TestInferenceHandlerCheckpoints:
                 "epoch": 1,
                 "model_state": de.state_dict(),
                 "model_config": posterior_config,
+                "theta_dim": theta_dim,
+                "x_dim": 12,
             },
             ckpt_path,
         )
 
         handler = InferenceHandler(prior_save)
-        handler.load_posterior(ckpt_path, None)
-        assert handler._density_estimator is not None
-
-    def test_load_posterior_warns_when_both_configs_given(
-        self, prior_save, posterior_config, tmp_path
-    ):
-        """When checkpoint has model_config and caller also passes one, checkpoint wins."""
-        prior = load_prior(prior_save)
-        neural_net = posterior_nn(
-            model=posterior_config.model,
-            hidden_features=posterior_config.hidden_features,
-            num_transforms=posterior_config.num_transforms,
-            dropout_probability=posterior_config.dropout_probability,
-            num_blocks=posterior_config.num_blocks,
-            num_bins=posterior_config.num_bins,
-            device=prior.device_handler.device,
-            z_score_x="structured",
-            z_score_theta="independent",
-        )
-        npe = NPE(
-            prior=prior,
-            density_estimator=neural_net,
-            device=prior.device_handler.device,
-        )
-        theta_dim = len(prior.prior_data.parameter_names)
-        de = npe._build_neural_net(torch.zeros(2, theta_dim), torch.zeros(2, 12))
-
-        ckpt_path = tmp_path / "both.ckpt"
-        torch.save(
-            {
-                "epoch": 1,
-                "model_state": de.state_dict(),
-                "model_config": posterior_config,
-            },
-            ckpt_path,
-        )
-
-        handler = InferenceHandler(prior_save)
-        handler.load_posterior(ckpt_path, posterior_config=posterior_config)
+        handler.load_posterior(ckpt_path)
         assert handler._density_estimator is not None

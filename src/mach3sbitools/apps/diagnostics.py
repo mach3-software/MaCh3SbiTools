@@ -39,7 +39,7 @@ def diagnostics_module(
     prior.save(prior_path)
 
     inference_handler = InferenceHandler(prior_path, nuisance_pars)
-    inference_handler.load_posterior(Path(posterior), posterior_config=None)
+    inference_handler.load_posterior(Path(posterior))
 
     output_file = Path(output_file)
     output_file.mkdir(parents=True, exist_ok=True)

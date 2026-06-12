@@ -146,7 +146,7 @@ class InferenceHandler:
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
         logger.info(f"Fitted theta with {compressor}")
 
-    def apply_compression(self) -> None:
+    def _apply_compression(self) -> None:
         if self._tensor_dataset is None:
             raise ValueError("call load_training_data before fitting compressor")
 
@@ -243,6 +243,8 @@ class InferenceHandler:
     ) -> None:
         """Internal: run the Lightning training loop."""
         assert self._tensor_dataset is not None
+
+        self._apply_compression()
 
         lightning_module = SBILightningModule(density_estimator, config, model_config)
 

@@ -36,6 +36,10 @@ def train_module(
     show_progress: bool,
     compile_model: bool,
     prune_model: float | None,
+    compress_x: bool,
+    compress_theta: bool,
+    compress_x_components: int,
+    compress_theta_components: int,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -104,6 +108,12 @@ def train_module(
         handler.resume_training(Path(resume_checkpoint), training_config)
     else:
         # ── Fresh training path ────────────────────────────────────────────
+        if compress_theta:
+            handler.fit_theta_compressor("pca", n_components=compress_theta_components)
+
+        if compress_x:
+            handler.fit_x_compressor("pca", n_components=compress_x_components)
+
         posterior_config = PosteriorConfig(
             model=model,
             hidden_features=hidden,

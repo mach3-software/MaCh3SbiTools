@@ -370,6 +370,28 @@ def save_data(
     default=None,
     help="Prune the model. This reduces the number of nodes dynamically but may compromise accuracy.",
 )
+@optgroup.option(
+    "--compress_x",
+    is_flag=True,
+    default=False,
+    help="Apply PCA compression to X (if resuming this has not effect)",
+)
+@optgroup.option(
+    "--compress_x_components",
+    type=int,
+    help="How many components to compress X down to",
+)
+@optgroup.option(
+    "--compress_theta",
+    is_flag=True,
+    default=False,
+    help="Apply PCA compression to  (if resuming this has not effect)",
+)
+@optgroup.option(
+    "--compress_theta_components",
+    type=int,
+    help="How many components to compress theta down to",
+)
 # Checkpointing & logging
 @optgroup.group("Checkpointing & Logging")
 @optgroup.option(
@@ -430,6 +452,10 @@ def train(
     show_progress: bool,
     compile_model: bool,
     prune_model: float | None,
+    compress_x: bool,
+    compress_theta: bool,
+    compress_x_components: int,
+    compress_theta_components: int,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -476,6 +502,10 @@ def train(
         show_progress,
         compile_model,
         prune_model,
+        compress_x,
+        compress_theta,
+        compress_x_components,
+        compress_theta_components,
     )
 
 

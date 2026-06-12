@@ -18,6 +18,8 @@ and zero elsewhere.  Sampling is done by first drawing the region
 (Bernoulli(0.5)) and then drawing uniformly within it.
 """
 
+from typing import cast
+
 import torch
 import torch.distributions
 
@@ -56,6 +58,9 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
         self.device = nominals.device
         self._lower = torch.tensor(lower, dtype=torch.double, device=self.device)
         self._upper = torch.tensor(upper, dtype=torch.double, device=self.device)
+
+        print(self._upper, self._lower)
+
         self._width = self._upper - self._lower  # width of one region
         self._pdf_val = 0.5 / self._width  # constant density on each region
 
@@ -91,7 +96,9 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
         """
         a, b = self._lower, self._upper
         var_scalar = (b**2 + a * b + a**2) / 3.0
-        return var_scalar.expand(len(self.nominals)).to(torch.double)
+        return cast(
+            torch.Tensor, var_scalar.expand(len(self.nominals)).to(torch.double)
+        )
 
     # ── Probability interface ──────────────────────────────────────────────────
 

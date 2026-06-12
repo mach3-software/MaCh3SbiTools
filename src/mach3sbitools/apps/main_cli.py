@@ -324,7 +324,7 @@ def save_data(
 )
 @optgroup.option(
     "--stop_after_epochs",
-    default=50,
+    default=100,
     type=int,
     show_default=True,
     help="Stop if EMA validation loss has not improved for this many epochs.",
@@ -338,7 +338,7 @@ def save_data(
 )
 @optgroup.option(
     "--scheduler_patience",
-    default=20,
+    default=50,
     type=int,
     show_default=True,
     help="Epochs without improvement before ReduceLROnPlateau halves the learning rate.",

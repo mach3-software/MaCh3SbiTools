@@ -35,12 +35,22 @@ def _tiny_model(theta_dim: int = 4, x_dim: int = 6) -> torch.nn.Module:
         def __init__(self):
             super().__init__()
             self.fc = torch.nn.Linear(x_dim, theta_dim)
+            self.theta_dim = theta_dim
+            self.x_dim = x_dim
 
         def forward(self, x):
             return self.fc(x)
 
         def loss(self, theta, x):
             return ((self.fc(x) - theta) ** 2).mean(dim=-1)
+
+        @property
+        def input_shape(self):
+            return [self.theta_dim]
+
+        @property
+        def condition_shape(self):
+            return [self.x_dim]
 
     return TinyModel()
 

@@ -19,7 +19,7 @@ import fnmatch
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 import numpy as np
 import torch
@@ -291,6 +291,19 @@ class Prior(torch.distributions.Distribution):
         return MaskDistributionMap(gaussian_mask, dist)
 
     # ── Properties ─────────────────────────────────────────────────────────────
+    @property
+    def effective_lower_bounds(self) -> torch.Tensor:
+        """Lower bounds accounting for flipped parameters (which are valid in [-upper, -lower])."""
+        lb = self.prior_data.lower_bounds.clone()
+        if self._flipped_mask.any():
+            # Flipped params are valid from -upper to +upper (excluding the gap)
+            lb[self._flipped_mask] = -self.prior_data.upper_bounds[self._flipped_mask]
+        return lb
+
+    @property
+    def effective_upper_bounds(self) -> torch.Tensor:
+        """Upper bounds accounting for flipped parameters."""
+        return self.prior_data.upper_bounds
 
     @property
     def prior_data(self) -> PriorData:
@@ -323,13 +336,24 @@ class Prior(torch.distributions.Distribution):
 
     @property
     def support(self):
-        """Independent interval support defined by the parameter bounds."""
-        return constraints.independent(
-            constraints.interval(
-                self.prior_data.lower_bounds, self.prior_data.upper_bounds
-            ),
-            1,
-        )
+        class CheckBoundsConstraint(constraints.Constraint):
+            is_discrete = False
+            event_dim = 1
+
+            def __init__(self_, prior):
+                self_._prior = prior
+                super().__init__()
+
+            def check(self_, value: torch.Tensor) -> torch.Tensor:
+                # check_bounds expects (n_samples, n_params) so unsqueeze if needed
+                if value.dim() == 1:
+                    return cast(
+                        torch.Tensor,
+                        self_._prior.check_bounds(value.unsqueeze(0)).squeeze(0),
+                    )
+                return cast(torch.Tensor, self_._prior.check_bounds(value))
+
+        return CheckBoundsConstraint(self)
 
     # ── Distribution interface ─────────────────────────────────────────────────
 
@@ -375,34 +399,36 @@ class Prior(torch.distributions.Distribution):
             ).to(torch.double)
         return samples
 
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        log_prob = torch.zeros(
+            value.shape[:-1], dtype=torch.double, device=self.device_handler.device
+        )
+        for mask_map in self._priors:
+            lp = mask_map.distribution.log_prob(value[..., mask_map.mask])
+            # Some distributions (Uniform, FlippedUniform) return per-parameter
+            # log probs of shape (..., n_params) — sum over parameter dimension.
+            # Others (MultivariateNormal) already return per-sample scalars (...,).
+            if lp.shape != log_prob.shape:
+                lp = lp.sum(dim=-1)
+            log_prob += lp
+        return log_prob
+
     def check_bounds(self, params: torch.Tensor) -> torch.Tensor:
-        """
-        Check whether each sample in *params* lies within the prior support.
+        lb = self.effective_lower_bounds.to(params.device)
+        ub = self.effective_upper_bounds.to(params.device)
 
-        For most parameters this is the standard interval
-        ``[lower_bound, upper_bound]``.  For flipped parameters the support
-        is the union of two symmetric regions
-        ``[lower, upper] + [-upper, -lower]``, so a sample is valid when
-        its *absolute value* lies in ``[lower, upper]``.
-
-        :param params: Tensor of shape ``(n_samples, n_params)``.
-        :returns: Boolean tensor of shape ``(n_samples,)``.
-        """
-        lb = self.prior_data.lower_bounds.to(params.device)
-        ub = self.prior_data.upper_bounds.to(params.device)
-
-        # Standard interval check for all parameters
+        # Coarse check: within [-upper, +upper] for all params
         in_bounds = (params >= lb) & (params <= ub)
 
-        # Override flipped parameters: valid iff |value| in [lower, upper]
+        # For flipped params, also exclude the gap region (-lower, +lower)
         if self._flipped_mask.any():
-            abs_params = params.abs()
-            in_flipped = (abs_params >= lb) & (abs_params <= ub)
-            in_bounds[:, self._flipped_mask] = in_flipped[:, self._flipped_mask]
+            flipped_lb = self.prior_data.lower_bounds.to(params.device)
+            in_gap = params.abs() < flipped_lb
+            in_bounds[:, self._flipped_mask] &= ~in_gap[:, self._flipped_mask]
 
-        return self.device_handler.to_tensor(in_bounds.all(dim=-1))
-
-    # ── Persistence ────────────────────────────────────────────────────────────
+        return self.device_handler.to_tensor(
+            in_bounds.all(dim=-1)
+        )  # ── Persistence ────────────────────────────────────────────────────────────
 
     def save(self, output_path: Path) -> None:
         """

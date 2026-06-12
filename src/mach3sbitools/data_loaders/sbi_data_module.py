@@ -100,39 +100,41 @@ class SBIDataModule(L.LightningDataModule):
             generator=torch.Generator().manual_seed(42),
         )
 
+    def _make_dataloader(
+        self,
+        dataset: Dataset,
+        *,
+        shuffle: bool,
+        drop_last: bool = False,
+        batch_multiplier: int = 1,
+    ) -> DataLoader:
+        """Shared factory to avoid duplicating DataLoader kwargs."""
+        use_workers = self.config.num_workers > 0
+        return DataLoader(
+            dataset,
+            batch_size=self.config.batch_size * batch_multiplier,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            num_workers=self.config.num_workers,
+            pin_memory=True,
+            persistent_workers=use_workers,
+            prefetch_factor=5 if use_workers else None,
+        )
+
     def train_dataloader(self) -> DataLoader:
         """
-        Return the training DataLoader.
-
-        Shuffling is handled by Lightning's ``DistributedSampler`` under DDP,
-        or by ``shuffle=True`` on single-device runs.  ``drop_last=True``
-        keeps batch sizes uniform across ranks.
-
-        :raises RuntimeError: If :meth:`setup` has not been called.
+        Training data loader
         """
         if self.train_dataset is None:
             raise RuntimeError("Training set has not been set; call setup() first.")
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            drop_last=True,
-            num_workers=0,
-            pin_memory=True,
-        )
+        return self._make_dataloader(self.train_dataset, shuffle=True, drop_last=True)
 
     def val_dataloader(self) -> DataLoader:
         """
-        Return the validation DataLoader.
-
-        :raises RuntimeError: If :meth:`setup` has not been called.
+        Validation data loader
         """
         if self.val_dataset is None:
             raise RuntimeError("Validation set has not been set; call setup() first.")
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=0,
-            pin_memory=True,
+        return self._make_dataloader(
+            self.val_dataset, shuffle=False, batch_multiplier=4
         )

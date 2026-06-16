@@ -147,17 +147,29 @@ class InferenceHandler:
         logger.info(f"Fitted theta with {compressor}")
 
     def _apply_compression(self) -> None:
+        """
+        Apply fitted compressors to the tensor dataset in-place.
+        """
         if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+            raise ValueError("call load_training_data before applying compression")
 
         theta, x = self._tensor_dataset.tensors
-        if self._theta_compressor:
-            theta = self._theta_compressor.transform(theta)
-        if self._x_compressor:
-            x = self._x_compressor.transform(x)
 
+        if self._theta_compressor:
+            theta = self._theta_compressor.transform(theta).to(self.device_handler.device)
+        if self._x_compressor:
+            x = self._x_compressor.transform(x).to(self.device_handler.device)
+
+        # Rebuild the dataset so downstream consumers see the compressed tensors.
+        self._tensor_dataset = TensorDataset(theta, x)
         for t in self._tensor_dataset.tensors:
             t.share_memory_()
+
+        logger.info(
+            "After compression — theta shape: %s | x shape: %s",
+            tuple(theta.shape),
+            tuple(x.shape),
+        )
 
     def create_posterior(self, config: PosteriorConfig) -> None:
         """
@@ -210,6 +222,7 @@ class InferenceHandler:
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
 
+        self._apply_compression()
         density_estimator = self._build_density_estimator_from_inference()
         self._fit(density_estimator, config, model_config, ckpt_path=None)
 
@@ -219,7 +232,6 @@ class InferenceHandler:
         config: TrainingConfig,
     ) -> None:
         model_loader = ModelLoader(checkpoint_path)
-
         self._load_posterior(model_loader)
 
         assert self._density_estimator is not None
@@ -244,9 +256,8 @@ class InferenceHandler:
         """Internal: run the Lightning training loop."""
         assert self._tensor_dataset is not None
 
-        self._apply_compression()
 
-        lightning_module = SBILightningModule(density_estimator, config, model_config)
+        lightning_module = SBILightningModule(density_estimator, config, model_config, self._x_compressor, self._theta_compressor)
 
         # Compilation currently just seems really slow... (but adding it in for completeness!)
         if config.compile:
@@ -313,10 +324,10 @@ class InferenceHandler:
         self.build_posterior()
         if self.posterior is None:
             raise ValueError("Train or load a density estimator first.")
-        x_tensor = self.device_handler.to_tensor(x).to(self.prior.device_handler.device)
-
+        x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
+        
         if self._x_compressor is not None:
-            x_tensor = self._x_compressor.transform(x_tensor)
+            x_tensor = self._x_compressor.transform(x_tensor).to(self.device_handler.device)
 
         samples = cast(
             torch.Tensor,
@@ -383,10 +394,6 @@ class InferenceHandler:
 
     def _load_posterior(self, loader: ModelLoader):
         self.create_posterior(loader.model_config)
-        if loader.theta_dim != len(self.parameter_names):
-            raise ValueError(
-                f"Total number of parameters ({len(self.parameter_names)})!=theta_dim in checkpoint ({loader.theta_dim})"
-            )
 
         device = self.device_handler.device
         density_estimator = self.inference._build_neural_net(  # type: ignore[union-attr]
@@ -434,6 +441,7 @@ class InferenceHandler:
         """
         Initialise the density estimator using the first batch of training data
         as a shape probe.
+
         """
         if self.inference is None:
             raise ValueError("inference is None — call create_posterior() first.")
@@ -461,5 +469,5 @@ class InferenceHandler:
             strategy=strat,
             accelerator=acc,
             devices="auto",
-            num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
+            num_nodes=int(os.environ.get("§URM_NNODES", 1)),
         )

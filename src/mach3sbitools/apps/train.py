@@ -2,12 +2,18 @@
 
 import os
 from pathlib import Path
+import warnings
 
 import torch
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.utils import PosteriorConfig, TrainingConfig, get_logger
 
+# Suppress the LeafSpec deprecation warnings stemming from lightning/torch interaction
+# 1. Suppress the LeafSpec deprecation warnings stemming from torch/lightning pytree
+warnings.filterwarnings("ignore", category=UserWarning, module=".*_pytree.*")
+warnings.filterwarnings("ignore", message=".*LeafSpec.*")
+warnings.filterwarnings("ignore", message=".*It is recommended to use.*")
 
 def train_module(
     save_file: Path,

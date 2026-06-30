@@ -30,11 +30,8 @@ After loading a checkpoint, compressors are restored automatically::
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
-import numpy as np
 import torch
-
 
 # ---------------------------------------------------------------------------
 # Abstract base
@@ -57,7 +54,7 @@ class Compressor(ABC):
         """Return ``True`` once :meth:`fit` has been called successfully."""
 
     @abstractmethod
-    def fit(self, data: torch.Tensor) -> "Compressor":
+    def fit(self, data: torch.Tensor) -> Compressor:
         """
         Fit the compressor to *data* and return ``self`` for chaining.
 
@@ -96,7 +93,7 @@ class Compressor(ABC):
         """
 
     @abstractmethod
-    def load_state_dict(self, state: dict) -> "Compressor":
+    def load_state_dict(self, state: dict) -> Compressor:
         """
         Restore fitted state from *state* and return ``self``.
 
@@ -106,20 +103,18 @@ class Compressor(ABC):
     # ── Convenience ───────────────────────────────────────────────────────────
 
     @property
-    def input_dim(self) -> Optional[int]:
+    def input_dim(self) -> int | None:
         """Original feature dimension, or ``None`` if not yet fitted."""
         return None
 
     @property
-    def output_dim(self) -> Optional[int]:
+    def output_dim(self) -> int | None:
         """Compressed dimension, or ``None`` if not yet fitted."""
         return None
 
     def __repr__(self) -> str:  # pragma: no cover
         fitted = "fitted" if self.is_fitted else "unfitted"
-        dims = (
-            f"{self.input_dim}→{self.output_dim}" if self.is_fitted else "?"
-        )
+        dims = f"{self.input_dim}→{self.output_dim}" if self.is_fitted else "?"
         return f"{self.__class__.__name__}({dims}, {fitted})"
 
 
@@ -140,7 +135,7 @@ class IdentityCompressor(Compressor):
     def is_fitted(self) -> bool:
         return True
 
-    def fit(self, data: torch.Tensor) -> "IdentityCompressor":
+    def fit(self, data: torch.Tensor) -> IdentityCompressor:
         return self
 
     def compress(self, data: torch.Tensor) -> torch.Tensor:
@@ -152,7 +147,7 @@ class IdentityCompressor(Compressor):
     def state_dict(self) -> dict:
         return {"type": "identity"}
 
-    def load_state_dict(self, state: dict) -> "IdentityCompressor":
+    def load_state_dict(self, state: dict) -> IdentityCompressor:
         return self
 
 
@@ -183,7 +178,7 @@ class PCACompressor(Compressor):
         self.whiten = whiten
 
         self._mean: torch.Tensor | None = None
-        self._components: torch.Tensor | None = None   # (n_components, n_features)
+        self._components: torch.Tensor | None = None  # (n_components, n_features)
         self._explained_variance: torch.Tensor | None = None  # (n_components,)
         self._input_dim: int | None = None
 
@@ -201,9 +196,9 @@ class PCACompressor(Compressor):
     def output_dim(self) -> int | None:
         if self._components is None:
             return None
-        return self._components.shape[0]
+        return int(self._components.shape[0])
 
-    def fit(self, data: torch.Tensor) -> "PCACompressor":
+    def fit(self, data: torch.Tensor) -> PCACompressor:
         """
         Compute the PCA basis from *data*.
 
@@ -235,7 +230,7 @@ class PCACompressor(Compressor):
         #   Vh : (min(n,p), n_features)
         _, S, Vh = torch.linalg.svd(centred, full_matrices=False)
 
-        components = Vh[:k]                    # (k, n_features)
+        components = Vh[:k]  # (k, n_features)
         explained_var = (S[:k] ** 2) / (n_samples - 1)
 
         # Store on CPU for device-agnostic serialisation
@@ -254,10 +249,10 @@ class PCACompressor(Compressor):
         :returns: Tensor of shape ``(n_samples, n_components)``.
         """
         self._check_fitted()
-        mean = self._mean.to(data.device)           # type: ignore[union-attr]
-        components = self._components.to(data.device)   # type: ignore[union-attr]
+        mean = self._mean.to(data.device)  # type: ignore[union-attr]
+        components = self._components.to(data.device)  # type: ignore[union-attr]
 
-        z = (data - mean) @ components.T            # (n_samples, n_components)
+        z = (data - mean) @ components.T  # (n_samples, n_components)
 
         if self.whiten:
             std = self._explained_variance.to(data.device).sqrt().clamp(min=1e-8)  # type: ignore[union-attr]
@@ -273,8 +268,8 @@ class PCACompressor(Compressor):
         :returns: Tensor of shape ``(n_samples, n_features)``.
         """
         self._check_fitted()
-        mean = self._mean.to(data.device)               # type: ignore[union-attr]
-        components = self._components.to(data.device)   # type: ignore[union-attr]
+        mean = self._mean.to(data.device)  # type: ignore[union-attr]
+        components = self._components.to(data.device)  # type: ignore[union-attr]
 
         z = data
         if self.whiten:
@@ -297,7 +292,7 @@ class PCACompressor(Compressor):
             "input_dim": self._input_dim,
         }
 
-    def load_state_dict(self, state: dict) -> "PCACompressor":
+    def load_state_dict(self, state: dict) -> PCACompressor:
         self.n_components = state["n_components"]
         self.whiten = state["whiten"]
         self._mean = state["mean"]

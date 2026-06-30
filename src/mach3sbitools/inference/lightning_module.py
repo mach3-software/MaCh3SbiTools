@@ -9,12 +9,12 @@ import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.utils import PosteriorConfig, TrainingConfig, get_logger
-
+from mach3sbitools.utils import PosteriorConfig, TrainingConfig
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
 
 torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
+
 
 class SBILightningModule(L.LightningModule):
     """
@@ -183,7 +183,10 @@ class SBILightningModule(L.LightningModule):
             self.log("train/param_norm", total_param_norm_sq**0.5, sync_dist=False)
 
     def on_before_optimizer_step(self, optimizer) -> None:
-        if self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0 or not self.trainer.is_global_zero:
+        if (
+            self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0
+            or not self.trainer.is_global_zero
+        ):
             return
 
         total_grad_norm_sq = 0.0
@@ -196,7 +199,6 @@ class SBILightningModule(L.LightningModule):
             self.log(f"grad_norms/{name}", layer_grad_norm, sync_dist=False)
 
         self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
-
 
     # ── Validation ────────────────────────────────────────────────────────────
 

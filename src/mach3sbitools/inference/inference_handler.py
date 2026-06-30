@@ -36,8 +36,9 @@ from mach3sbitools.data_processors import (
     compressor_factory,
     restore_compressor,
 )
-from mach3sbitools.simulator import load_prior, CompressedPriorWrapper
+from mach3sbitools.simulator import CompressedPriorWrapper, load_prior
 from mach3sbitools.types import SimulatorData
+
 # SBI Tools
 from mach3sbitools.utils import (
     PosteriorConfig,
@@ -76,7 +77,7 @@ class InferenceHandler:
         :param prior_path: Path to a pickled :class:`~mach3sbitools.simulator.Prior`.
         """
         self.device_handler = TorchDeviceHandler()
-        self.prior = load_prior(prior_path)#.to(self.device_handler.device)
+        self.prior = load_prior(prior_path)  # .to(self.device_handler.device)
         self.parameter_names = self.prior.prior_data.parameter_names
 
         # if len(
@@ -102,9 +103,7 @@ class InferenceHandler:
 
         :param data_folder: Directory containing ``.feather`` files.
         """
-        self.dataset = ParaketDataset(
-            data_folder, self.prior
-        )
+        self.dataset = ParaketDataset(data_folder, self.prior)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
         )
@@ -252,8 +251,13 @@ class InferenceHandler:
         """Internal: run the Lightning training loop."""
         assert self._tensor_dataset is not None
 
-
-        lightning_module = SBILightningModule(density_estimator, config, model_config, self._x_compressor, self._theta_compressor)
+        lightning_module = SBILightningModule(
+            density_estimator,
+            config,
+            model_config,
+            self._x_compressor,
+            self._theta_compressor,
+        )
 
         # Compilation currently just seems really slow... (but adding it in for completeness!)
         if config.compile:
@@ -288,15 +292,13 @@ class InferenceHandler:
     # ================================================
     # Sampling
     # ================================================
-# inference/inference_handler.py  — only the two methods below change
+    # inference/inference_handler.py  — only the two methods below change
 
     def build_posterior(self) -> None:
         if self._density_estimator is None:
             raise ValueError("Train or load a density estimator first.")
         if self.inference is None:
             raise ValueError("Call create_posterior() before build_posterior().")
-
-
 
         # If theta was compressed during training, sbi must see the compressed
         # prior so that its support checks operate in the right space.
@@ -313,14 +315,11 @@ class InferenceHandler:
         self.posterior = self.inference.build_posterior(
             self._density_estimator, posterior_parameters=pars
         )
-        
-        
-            
+
         # Restore the real prior so the NPE object stays consistent for
         # any subsequent training or reloading.
         if original_prior is not None:
             self.inference._prior = original_prior
-
 
     def sample_posterior(
         self,
@@ -335,7 +334,9 @@ class InferenceHandler:
 
         x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
         if self._x_compressor is not None:
-            x_tensor = self._x_compressor.transform(x_tensor).to(self.device_handler.device)
+            x_tensor = self._x_compressor.transform(x_tensor).to(
+                self.device_handler.device
+            )
 
         # Posterior samples arrive in compressed space; decompress before returning.
         samples_compressed = cast(
@@ -346,7 +347,6 @@ class InferenceHandler:
         if self._theta_compressor is not None:
             return self._theta_compressor.inverse_transform(samples_compressed)
         return samples_compressed
-
 
     def get_log_likelihood(
         self, theta: SimulatorData, x: list[float] | np.ndarray, **kwargs
@@ -451,7 +451,7 @@ class InferenceHandler:
         if self.inference is None:
             raise ValueError("inference is None — call create_posterior() first.")
         assert self._tensor_dataset is not None
-        
+
         # Use a large representative batch for accurate z-score statistics
         # 10 samples (the previous value) gives wildly inaccurate mean/std
         n_probe = min(100_000, self._tensor_dataset.tensors[0].shape[0])

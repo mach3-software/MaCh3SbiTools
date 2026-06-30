@@ -2,15 +2,15 @@
 Feather file I/O utilities for simulation data.
 """
 
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import TypedDict
 
-import torch
 import numpy as np
+import torch
 from pyarrow import Table, feather
 
 from mach3sbitools.types import SimulatorData, SimulatorDataGrouped
+
 
 class FeatherOutput(TypedDict):
     """Schema for feather files written by :func:`to_feather`."""
@@ -47,13 +47,12 @@ class FeatherOutput(TypedDict):
 #         dtype=bool,
 #     )
 #     print(param_filter)
-    
+
 #     return theta[:, param_filter].copy()
 
 
 def from_feather(
-    file_name: Path,
-    nuisance_filter: torch.Tensor
+    file_name: Path, nuisance_filter: torch.Tensor
 ) -> SimulatorDataGrouped:
     """
     Load a ``(theta, x)`` pair from a feather file.
@@ -75,7 +74,7 @@ def from_feather(
     theta = np.array(table["theta"].to_list(), dtype=np.float32)
     x = np.array(table["x"].to_list(), dtype=np.float32)
 
-    theta = theta[:, nuisance_filter.to('cpu').numpy()]
+    theta = theta[:, nuisance_filter.to("cpu").numpy()]
 
     return theta, x
 

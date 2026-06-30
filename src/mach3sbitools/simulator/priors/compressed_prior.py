@@ -38,7 +38,6 @@ class CompressedPriorWrapper(Distribution):
       ``(n, n_params) → (n, n_components)``.
     """
 
-    arg_constraints: dict = {}
     has_rsample = False
 
     def __init__(
@@ -46,6 +45,7 @@ class CompressedPriorWrapper(Distribution):
         prior: Prior,
         theta_compressor: CompressorBase,
     ) -> None:
+
         self._prior = prior
         self._compressor = theta_compressor
 
@@ -65,16 +65,15 @@ class CompressedPriorWrapper(Distribution):
         """
         # 1. Track the incoming device
         device = theta_compressed.device
-        
+
         # 2. Safely ensure the underlying prior matches this device
         if hasattr(self._prior, "to"):
             self._prior = self._prior.to(device)
-            
+
         theta_orig = self._compressor.inverse_transform(
             theta_compressed.to(torch.float32)
         )
         return self._prior.log_prob(theta_orig.to(dtype=torch.double, device=device))
-
 
     def sample(
         self,
@@ -113,7 +112,7 @@ class CompressedPriorWrapper(Distribution):
             is_discrete = False
             event_dim = 1
 
-            def check(self_, value: torch.Tensor) -> torch.Tensor:  # noqa: N805
+            def check(self_, value: torch.Tensor) -> torch.Tensor:
                 # value : (..., n_components)
                 orig = compressor.inverse_transform(value.to(torch.float32))
                 # prior.check_bounds expects (n_samples, n_params)

@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from mach3sbitools.utils.device_handler import TensorConversionError, TorchDeviceHandler
-from mach3sbitools.utils.file_utils import filter_nuisance, from_feather, to_feather
+from mach3sbitools.utils.file_utils import from_feather, to_feather
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TorchDeviceHandler
@@ -37,27 +37,6 @@ class TestTorchDeviceHandler:
     def test_to_tensor_raises_on_unconvertible(self):
         with pytest.raises(TensorConversionError):
             TorchDeviceHandler().to_tensor(object())
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# filter_nuisance
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestFilterNuisance:
-    def test_removes_matching_columns(self):
-        theta = np.arange(10).reshape(2, 5).astype(np.float32)
-        names = ["keep_1", "drop_x", "keep_2", "drop_y", "keep_3"]
-        assert filter_nuisance(names, ["drop_*"], theta).shape == (2, 3)
-
-    def test_raises_on_length_mismatch(self):
-        with pytest.raises(ValueError):
-            filter_nuisance(["a", "b"], ["a"], np.ones((5, 3)))
-
-    def test_returns_unchanged_when_nuisance_is_none(self):
-        theta = np.ones((5, 3))
-        result = filter_nuisance(["a", "b", "c"], None, theta)
-        np.testing.assert_array_equal(result, theta)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

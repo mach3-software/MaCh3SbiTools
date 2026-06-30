@@ -40,7 +40,7 @@ def importance_sample_module(
 
     prior_path = Path("/tmp/prior.pkl")
     simulator.prior.save(prior_path)
-    inference_handler = InferenceHandler(Path(prior_path), nuisance_pars)
+    inference_handler = InferenceHandler(Path(prior_path))
     inference_handler.load_posterior(Path(posterior))
     inference_handler.build_posterior()
 

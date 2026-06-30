@@ -47,7 +47,7 @@ def inference(
 
     # PosteriorConfig is recovered from the checkpoint — the caller does not
     # need to supply (and cannot accidentally mismatch) architecture flags.
-    inference_handler = InferenceHandler(Path(prior_path), nuisance_pars)
+    inference_handler = InferenceHandler(Path(prior_path))
     inference_handler.load_posterior(Path(posterior))
 
     parameter_names = inference_handler.prior.prior_data.parameter_names

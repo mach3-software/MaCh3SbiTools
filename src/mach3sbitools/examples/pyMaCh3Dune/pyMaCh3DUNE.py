@@ -123,8 +123,7 @@ class pyMaCh3DUNESimulator:
     def get_log_likelihood(self, theta: list[float] | np.ndarray) -> float:
         lower, upper = self.get_parameter_bounds()
         if np.any(theta < lower) or np.any(theta > upper):
-            return -np.inf
-
+            return float(-np.inf)
         try:
             self._set_parameter_values(theta)
             prior_llh: float = self.parameter_handler.calculate_likelihood()
@@ -135,7 +134,7 @@ class pyMaCh3DUNESimulator:
 
             return -sample_llh - prior_llh
         except RuntimeError:
-            return -np.inf
+            return float(-np.inf)
 
     # -----------------
     # Helpers

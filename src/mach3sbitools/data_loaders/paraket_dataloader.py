@@ -8,8 +8,9 @@ import torch
 from torch.utils.data import Dataset, TensorDataset
 from tqdm import tqdm
 
-from mach3sbitools.utils import from_feather
 from mach3sbitools.simulator import Prior
+from mach3sbitools.utils import from_feather
+
 
 class ParaketDataset(Dataset):
     """
@@ -20,11 +21,7 @@ class ParaketDataset(Dataset):
     pre-load everything into RAM as a flat :class:`~torch.utils.data.TensorDataset`.
     """
 
-    def __init__(
-        self,
-        data_folder: Path,
-        prior: Prior
-    ):
+    def __init__(self, data_folder: Path, prior: Prior):
         """
         :param data_folder: Directory containing ``.feather`` files.
         :param parameter_names: Ordered list of parameter names in each file's
@@ -51,9 +48,7 @@ class ParaketDataset(Dataset):
         :param idx: File index.
         :returns: Tuple of ``(theta, x)`` float tensors.
         """
-        theta, x = from_feather(
-            self.files[idx], self.prior.nuisance_filter
-        )
+        theta, x = from_feather(self.files[idx], self.prior.nuisance_filter)
         return torch.from_numpy(theta), torch.from_numpy(x)
 
     def to_tensor_dataset(

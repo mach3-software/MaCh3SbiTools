@@ -19,7 +19,7 @@ import fnmatch
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import TypeAlias
 
 import numpy as np
 import torch
@@ -147,7 +147,7 @@ class Prior(torch.distributions.Distribution):
             full_cyclical_mask = torch.zeros(
                 len(self._prior_data.parameter_names),
                 dtype=torch.bool,
-                device=self.device_handler.device
+                device=self.device_handler.device,
             )
             full_cyclical_mask[self.nuisance_filter] = cyclical_mask
             self._prior_data.lower_bounds[full_cyclical_mask] = -2 * torch.pi
@@ -179,15 +179,11 @@ class Prior(torch.distributions.Distribution):
         # ── Flat mask ──────────────────────────────────────────────────────
         # Guard against None so the tensor conversion doesn't crash.
         flat_msk = flat_msk if flat_msk is not None else [False] * n_params
-        
-        flat_msk_tensor = self.device_handler.to_tensor(flat_msk).bool()
-        flat_msk_filtered = flat_msk_tensor[self.nuisance_filter] 
 
-        flat_mask = (
-            flat_msk_filtered   
-            & ~cyclical_mask
-            & ~flipped_mask
-        )
+        flat_msk_tensor = self.device_handler.to_tensor(flat_msk).bool()
+        flat_msk_filtered = flat_msk_tensor[self.nuisance_filter]
+
+        flat_mask = flat_msk_filtered & ~cyclical_mask & ~flipped_mask
         if any(flat_mask):
             self._priors.append(self._get_flat_map(flat_mask))
 
@@ -221,13 +217,11 @@ class Prior(torch.distributions.Distribution):
 
         keep = [
             not any(
-                (p == n) if "*" not in n and "?" not in n
-                else fnmatch.fnmatch(p, n)
+                (p == n) if "*" not in n and "?" not in n else fnmatch.fnmatch(p, n)
                 for n in nuisance_patterns
             )
             for p in self._prior_data.parameter_names
         ]
-
 
         return self.device_handler.to_tensor(keep)
 
@@ -356,7 +350,6 @@ class Prior(torch.distributions.Distribution):
             ),
             1,
         )
-
 
     # ── Distribution interface ─────────────────────────────────────────────────
 

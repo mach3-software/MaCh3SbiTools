@@ -13,7 +13,7 @@ from mach3sbitools.utils import PosteriorConfig, TrainingConfig
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
 
-torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
+# torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 
 class SBILightningModule(L.LightningModule):

@@ -30,7 +30,7 @@ from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParamet
 from sbi.neural_nets import posterior_nn
 from torch.utils.data import TensorDataset
 
-from mach3sbitools.data_loaders import ParaketDataset, SBIDataModule
+from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
 from mach3sbitools.data_processors import (
     CompressorBase,
     compressor_factory,
@@ -87,7 +87,7 @@ class InferenceHandler:
         #         "Prior must have same nuisance params as inference handler!"
         #     )
 
-        self.dataset: ParaketDataset | None = None
+        self.dataset: TrainingDataset | None = None
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
@@ -103,7 +103,7 @@ class InferenceHandler:
 
         :param data_folder: Directory containing ``.feather`` files.
         """
-        self.dataset = ParaketDataset(data_folder, self.prior)
+        self.dataset = TrainingDataset(data_folder, self.prior)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
         )

@@ -55,7 +55,7 @@ class TestFeatherIO:
 
     def test_round_trip_preserves_values(self, feather_file):
         path, theta, x = feather_file
-        t_out, x_out = from_feather(path, [f"p{i}" for i in range(4)])
+        t_out, x_out = from_feather(path)
         np.testing.assert_allclose(t_out, theta, rtol=1e-5)
         np.testing.assert_allclose(x_out, x, rtol=1e-5)
 
@@ -64,7 +64,9 @@ class TestFeatherIO:
         x = np.ones((10, 5), dtype=np.float32)
         path = tmp_path / "nuisance.feather"
         to_feather(path, theta, x)
-        t, _ = from_feather(path, ["keep", "drop_x", "keep2"], nuisance_pars=["drop_*"])
+        nuis_fil = np.ones(3, dtype=bool)
+        nuis_fil[-1] = False
+        t, _ = from_feather(path, nuisance_filter=nuis_fil)
         assert t.shape == (10, 2)
 
     def test_raises_on_wrong_suffix(self, tmp_path):
@@ -77,4 +79,4 @@ class TestFeatherIO:
 
     def test_raises_if_file_not_found(self):
         with pytest.raises(FileNotFoundError):
-            from_feather(Path("/no/such/file.feather"), ["a"])
+            from_feather(Path("/no/such/file.feather"))

@@ -12,7 +12,7 @@ from mach3sbitools.simulator import Prior
 from mach3sbitools.utils import from_feather
 
 
-class ParaketDataset(Dataset):
+class TrainingDataset(Dataset):
     """
     File-level PyTorch dataset over a folder of ``.feather`` simulation files.
 

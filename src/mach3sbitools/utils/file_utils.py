@@ -52,14 +52,13 @@ class FeatherOutput(TypedDict):
 
 
 def from_feather(
-    file_name: Path, nuisance_filter: torch.Tensor
+    file_name: Path, nuisance_filter: torch.Tensor | np.ndarray | None = None
 ) -> SimulatorDataGrouped:
     """
     Load a ``(theta, x)`` pair from a feather file.
 
     :param file_name: Path to the ``.feather`` file.
-    :param parameter_names: Ordered parameter names used for nuisance filtering.
-    :param nuisance_pars: fnmatch patterns for parameters to exclude from
+    :param nuisance_filter: fnmatch patterns for parameters to exclude from
         *theta*. ``None`` returns all parameters.
     :returns: Tuple of ``(theta, x)`` as ``float32`` numpy arrays.
     :raises FileNotFoundError: If *file_name* does not exist.
@@ -74,7 +73,12 @@ def from_feather(
     theta = np.array(table["theta"].to_list(), dtype=np.float32)
     x = np.array(table["x"].to_list(), dtype=np.float32)
 
-    theta = theta[:, nuisance_filter.to("cpu").numpy()]
+    # HW : Don't love the nesting, but oh well
+    if nuisance_filter is not None:
+        if isinstance(nuisance_filter, torch.Tensor):
+            nuisance_filter = nuisance_filter.to("cpu").numpy()
+
+        theta = theta[:, nuisance_filter]
 
     return theta, x
 

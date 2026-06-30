@@ -11,7 +11,8 @@ import torch
 from torch.distributions import Distribution, constraints
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.simulator.priors import Prior
+
+from .prior import Prior
 
 
 class CompressedPriorWrapper(Distribution):

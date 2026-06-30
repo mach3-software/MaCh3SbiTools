@@ -243,12 +243,6 @@ def save_data(
     required=True,
     help="Path to a saved Prior .pkl file.",
 )
-@optgroup.option(
-    "--nuisance_pars",
-    "-p",
-    multiple=True,
-    help="Parameter name patterns (fnmatch-style) to exclude from training.",
-)
 # Model architecture
 @optgroup.group("Model Architecture")
 @optgroup.option(
@@ -429,7 +423,6 @@ def train(
     save_file: Path,
     prior_path: Path,
     dataset: Path,
-    nuisance_pars: list[str],
     model: str,
     hidden: int,
     dropout: float,
@@ -479,7 +472,6 @@ def train(
         save_file,
         prior_path,
         dataset,
-        nuisance_pars,
         model,
         hidden,
         dropout,

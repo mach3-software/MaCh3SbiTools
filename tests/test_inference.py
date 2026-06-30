@@ -208,7 +208,7 @@ class TestInferenceHandlerCheckpoints:
             num_blocks=posterior_config.num_blocks,
             num_bins=posterior_config.num_bins,
             device=prior.device_handler.device,
-            z_score_x="structured",
+            z_score_x="independent",
             z_score_theta="independent",
         )
         npe = NPE(
@@ -217,7 +217,8 @@ class TestInferenceHandlerCheckpoints:
             device=prior.device_handler.device,
         )
         theta_dim = len(prior.prior_data.parameter_names)
-        de = npe._build_neural_net(torch.zeros(2, theta_dim), torch.zeros(2, 12))
+        x_dim = 12
+        de = npe._build_neural_net(torch.zeros(2, theta_dim), torch.zeros(2, x_dim))
 
         ckpt_path = tmp_path / "autosave.ckpt"
         torch.save(
@@ -226,7 +227,7 @@ class TestInferenceHandlerCheckpoints:
                 "model_state": de.state_dict(),
                 "model_config": posterior_config,
                 "theta_dim": theta_dim,
-                "x_dim": 12,
+                "x_dim": x_dim,
                 "x_compressor": None,
                 "theta_compressor": None,
             },

@@ -30,13 +30,13 @@ from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParamet
 from sbi.neural_nets import posterior_nn
 from torch.utils.data import TensorDataset
 
-from mach3sbitools.data_loaders import ParaketDataset, SBIDataModule
+from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
 from mach3sbitools.data_processors import (
     CompressorBase,
     compressor_factory,
     restore_compressor,
 )
-from mach3sbitools.simulator import load_prior
+from mach3sbitools.simulator import CompressedPriorWrapper, load_prior
 from mach3sbitools.types import SimulatorData
 
 # SBI Tools
@@ -70,27 +70,24 @@ class InferenceHandler:
     def __init__(
         self,
         prior_path: Path,
-        nuisance_pars: list[str] | None = None,
     ) -> None:
         """
         Initialise the handler and load the prior.
 
         :param prior_path: Path to a pickled :class:`~mach3sbitools.simulator.Prior`.
-        :param nuisance_pars: fnmatch patterns for parameters to exclude.
         """
         self.device_handler = TorchDeviceHandler()
-        self.prior = load_prior(prior_path).to(self.device_handler.device)
+        self.prior = load_prior(prior_path)  # .to(self.device_handler.device)
         self.parameter_names = self.prior.prior_data.parameter_names
-        self.nuisance_pars = nuisance_pars
 
-        if len(
-            self.prior.prior_data[self.prior._nuisance_filter].parameter_names
-        ) != len(self.prior.prior_data.parameter_names):
-            raise ValueError(
-                "Prior must have same nuisance params as inference handler!"
-            )
+        # if len(
+        #     self.prior.prior_data[self.prior._nuisance_filter].parameter_names
+        # ) != len(self.prior.prior_data.parameter_names):
+        #     raise ValueError(
+        #         "Prior must have same nuisance params as inference handler!"
+        #     )
 
-        self.dataset: ParaketDataset | None = None
+        self.dataset: TrainingDataset | None = None
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
@@ -106,9 +103,7 @@ class InferenceHandler:
 
         :param data_folder: Directory containing ``.feather`` files.
         """
-        self.dataset = ParaketDataset(
-            data_folder, self.parameter_names.tolist(), self.nuisance_pars
-        )
+        self.dataset = TrainingDataset(data_folder, self.prior)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
         )
@@ -147,17 +142,29 @@ class InferenceHandler:
         logger.info(f"Fitted theta with {compressor}")
 
     def _apply_compression(self) -> None:
+        """
+        Apply fitted compressors to the tensor dataset in-place.
+        """
         if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+            raise ValueError("call load_training_data before applying compression")
 
         theta, x = self._tensor_dataset.tensors
+
         if self._theta_compressor:
             theta = self._theta_compressor.transform(theta)
         if self._x_compressor:
             x = self._x_compressor.transform(x)
 
+        # Rebuild the dataset so downstream consumers see the compressed tensors.
+        self._tensor_dataset = TensorDataset(theta, x)
         for t in self._tensor_dataset.tensors:
             t.share_memory_()
+
+        logger.info(
+            "After compression — theta shape: %s | x shape: %s",
+            tuple(theta.shape),
+            tuple(x.shape),
+        )
 
     def create_posterior(self, config: PosteriorConfig) -> None:
         """
@@ -173,7 +180,7 @@ class InferenceHandler:
         kwargs = select_model_kwargs(config)
         neural_net = posterior_nn(
             model=config.model,
-            z_score_x="structured",
+            z_score_x="independent",
             z_score_theta="independent",
             **kwargs,
         )
@@ -210,6 +217,7 @@ class InferenceHandler:
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
 
+        self._apply_compression()
         density_estimator = self._build_density_estimator_from_inference()
         self._fit(density_estimator, config, model_config, ckpt_path=None)
 
@@ -219,7 +227,6 @@ class InferenceHandler:
         config: TrainingConfig,
     ) -> None:
         model_loader = ModelLoader(checkpoint_path)
-
         self._load_posterior(model_loader)
 
         assert self._density_estimator is not None
@@ -244,9 +251,13 @@ class InferenceHandler:
         """Internal: run the Lightning training loop."""
         assert self._tensor_dataset is not None
 
-        self._apply_compression()
-
-        lightning_module = SBILightningModule(density_estimator, config, model_config)
+        lightning_module = SBILightningModule(
+            density_estimator,
+            config,
+            model_config,
+            self._x_compressor,
+            self._theta_compressor,
+        )
 
         # Compilation currently just seems really slow... (but adding it in for completeness!)
         if config.compile:
@@ -281,20 +292,34 @@ class InferenceHandler:
     # ================================================
     # Sampling
     # ================================================
-    def build_posterior(self) -> None:
-        """
-        Wrap the trained density estimator in an ``sbi`` posterior object.
+    # inference/inference_handler.py  — only the two methods below change
 
-        :raises ValueError: If no density estimator or NPE object is present.
-        """
+    def build_posterior(self) -> None:
         if self._density_estimator is None:
             raise ValueError("Train or load a density estimator first.")
         if self.inference is None:
             raise ValueError("Call create_posterior() before build_posterior().")
-        pars = DirectPosteriorParameters(enable_transform=False)
+
+        # If theta was compressed during training, sbi must see the compressed
+        # prior so that its support checks operate in the right space.
+        if self._theta_compressor is not None:
+            prior_for_sbi = CompressedPriorWrapper(self.prior, self._theta_compressor)
+            # Temporarily swap the prior on the NPE object so build_posterior
+            # picks up the wrapped version.
+            original_prior = self.inference._prior
+            self.inference._prior = prior_for_sbi
+        else:
+            original_prior = None
+
+        pars = DirectPosteriorParameters(enable_transform=True)
         self.posterior = self.inference.build_posterior(
             self._density_estimator, posterior_parameters=pars
         )
+
+        # Restore the real prior so the NPE object stays consistent for
+        # any subsequent training or reloading.
+        if original_prior is not None:
+            self.inference._prior = original_prior
 
     def sample_posterior(
         self,
@@ -302,30 +327,26 @@ class InferenceHandler:
         x: list[float] | np.ndarray,
         **kwargs,
     ) -> torch.Tensor:
-        """
-        Draw samples from the posterior conditioned on *x*.
-
-        :param num_samples: Number of posterior samples to draw.
-        :param x: Observed data vector *x_o*.
-        :returns: Tensor of shape ``(num_samples, n_params)``.
-        """
         logger.info(f"Sampling [bold]{num_samples:,}[/] points from posterior")
         self.build_posterior()
         if self.posterior is None:
             raise ValueError("Train or load a density estimator first.")
-        x_tensor = self.device_handler.to_tensor(x).to(self.prior.device_handler.device)
 
+        x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
         if self._x_compressor is not None:
-            x_tensor = self._x_compressor.transform(x_tensor)
+            x_tensor = self._x_compressor.transform(x_tensor).to(
+                self.device_handler.device
+            )
 
-        samples = cast(
+        # Posterior samples arrive in compressed space; decompress before returning.
+        samples_compressed = cast(
             torch.Tensor,
             self.posterior.sample((num_samples,), x=x_tensor, **kwargs),
         )
 
-        if self._theta_compressor:
-            samples = self._theta_compressor.inverse_transform(samples)
-        return samples
+        if self._theta_compressor is not None:
+            return self._theta_compressor.inverse_transform(samples_compressed)
+        return samples_compressed
 
     def get_log_likelihood(
         self, theta: SimulatorData, x: list[float] | np.ndarray, **kwargs
@@ -383,10 +404,6 @@ class InferenceHandler:
 
     def _load_posterior(self, loader: ModelLoader):
         self.create_posterior(loader.model_config)
-        if loader.theta_dim != len(self.parameter_names):
-            raise ValueError(
-                f"Total number of parameters ({len(self.parameter_names)})!=theta_dim in checkpoint ({loader.theta_dim})"
-            )
 
         device = self.device_handler.device
         density_estimator = self.inference._build_neural_net(  # type: ignore[union-attr]
@@ -431,15 +448,15 @@ class InferenceHandler:
         ]
 
     def _build_density_estimator_from_inference(self) -> nn.Module:
-        """
-        Initialise the density estimator using the first batch of training data
-        as a shape probe.
-        """
         if self.inference is None:
             raise ValueError("inference is None — call create_posterior() first.")
         assert self._tensor_dataset is not None
-        sample_theta = self._tensor_dataset.tensors[0][:10]
-        sample_x = self._tensor_dataset.tensors[1][:10]
+
+        # Use a large representative batch for accurate z-score statistics
+        # 10 samples (the previous value) gives wildly inaccurate mean/std
+        n_probe = min(100_000, self._tensor_dataset.tensors[0].shape[0])
+        sample_theta = self._tensor_dataset.tensors[0][:n_probe]
+        sample_x = self._tensor_dataset.tensors[1][:n_probe]
         return cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:
@@ -461,5 +478,5 @@ class InferenceHandler:
             strategy=strat,
             accelerator=acc,
             devices="auto",
-            num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
+            num_nodes=int(os.environ.get("§URM_NNODES", 1)),
         )

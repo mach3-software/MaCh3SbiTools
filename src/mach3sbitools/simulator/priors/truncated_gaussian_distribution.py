@@ -120,7 +120,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
             value.shape[:-1], float("-inf"), dtype=value.dtype, device=value.device
         )
         if in_b.any():
-            lp[in_b] = super().log_prob(value[in_b])
+            lp[in_b] = super().log_prob(value[in_b]).to(dtype=lp.dtype)
         return lp
 
     # ── Exact sampler ───────────────────────────────────────────────────────

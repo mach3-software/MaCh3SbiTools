@@ -1,6 +1,6 @@
 import torch
 
-from mach3sbitools.utils import get_logger
+from mach3sbitools.utils import TorchDeviceHandler, get_logger
 
 from .compressor_base import CompressorBase
 
@@ -23,6 +23,8 @@ class PCACompressor(CompressorBase):
         self.explained_variance: torch.Tensor | None = None
         self._n_samples_fit: int = 0
         self._n_features: int = 0
+
+        self.device_handler = TorchDeviceHandler()
 
     @property
     def is_fitted(self) -> bool:
@@ -76,7 +78,16 @@ class PCACompressor(CompressorBase):
         assert self.components is not None
         assert self.mean is not None
 
-        data, squeezed = self._unsqueeze_if_1d(data.float())
+        # 1. Identify where the incoming data lives (CPU or CUDA)
+        device = data.device
+        dtype = torch.float32
+
+        # 2. Dynamically shift the compressor parameters to match it
+        self.mean = self.mean.to(device=device, dtype=dtype)
+        self.components = self.components.to(device=device, dtype=dtype)
+
+        # 3. Perform the math safely on the same device
+        data, squeezed = self._unsqueeze_if_1d(data.to(dtype=dtype))
         out = (data - self.mean) @ self.components.T
         return self._squeeze_if_needed(out, squeezed)
 
@@ -87,7 +98,16 @@ class PCACompressor(CompressorBase):
         assert self.components is not None
         assert self.mean is not None
 
-        data, squeezed = self._unsqueeze_if_1d(data.float())
+        # 1. Identify where the incoming data lives (CPU or CUDA)
+        device = data.device
+        dtype = torch.float32
+
+        # 2. Dynamically shift the compressor parameters to match it
+        self.mean = self.mean.to(device=device, dtype=dtype)
+        self.components = self.components.to(device=device, dtype=dtype)
+
+        # 3. Perform the math safely on the same device
+        data, squeezed = self._unsqueeze_if_1d(data.to(dtype=dtype))
         out = data @ self.components + self.mean
         return self._squeeze_if_needed(out, squeezed)
 

@@ -1,6 +1,6 @@
 [project]
 name = "mach3sbitools"
-version = "3.2.5"
+version = "3.3.5"
 description = "Interface between SBI and MaCh3"
 readme = "README.md"
 requires-python = ">=3.11"

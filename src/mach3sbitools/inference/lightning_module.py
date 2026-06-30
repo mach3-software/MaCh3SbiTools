@@ -9,9 +9,11 @@ import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.utils.config import PosteriorConfig, TrainingConfig
+from mach3sbitools.utils import PosteriorConfig, TrainingConfig
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
+
+# torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 
 class SBILightningModule(L.LightningModule):
@@ -110,7 +112,6 @@ class SBILightningModule(L.LightningModule):
         :param batch_idx: Index of the current batch.
         :returns: Scalar mean loss.
         """
-
         theta, x = batch
         loss_per_sample = self.model.loss(theta, x)
         loss = loss_per_sample.mean()
@@ -170,21 +171,22 @@ class SBILightningModule(L.LightningModule):
             self.log("gpu/memory_pressure", allocated / total, sync_dist=True)
 
         # ── Expensive: weight statistics ──────────────────────────────────
-        if do_expensive:
+        if do_expensive and self.trainer.is_global_zero:
             total_param_norm_sq = 0.0
             for name, p in self.model.named_parameters():
                 if not p.requires_grad:
                     continue
-                self.log(f"weights/{name}/std", p.data.std(), rank_zero_only=True)
-                self.log(
-                    f"weights/{name}/max_abs", p.data.abs().max(), rank_zero_only=True
-                )
+                # REMOVED logger_kwargs
+                self.log(f"weights/{name}/std", p.data.std(), sync_dist=False)
+                self.log(f"weights/{name}/max_abs", p.data.abs().max(), sync_dist=False)
                 total_param_norm_sq += p.data.norm(2).item() ** 2
-            self.log("train/param_norm", total_param_norm_sq**0.5, rank_zero_only=True)
+            self.log("train/param_norm", total_param_norm_sq**0.5, sync_dist=False)
 
     def on_before_optimizer_step(self, optimizer) -> None:
-        """Capture gradient norms before the optimizer step clears them."""
-        if self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0:
+        if (
+            self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0
+            or not self.trainer.is_global_zero
+        ):
             return
 
         total_grad_norm_sq = 0.0
@@ -193,9 +195,10 @@ class SBILightningModule(L.LightningModule):
                 continue
             layer_grad_norm = p.grad.data.norm(2).item()
             total_grad_norm_sq += layer_grad_norm**2
-            self.log(f"grad_norms/{name}", layer_grad_norm, rank_zero_only=True)
+            # REMOVED logger_kwargs
+            self.log(f"grad_norms/{name}", layer_grad_norm, sync_dist=False)
 
-        self.log("train/grad_norm", total_grad_norm_sq**0.5, rank_zero_only=True)
+        self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
 
     # ── Validation ────────────────────────────────────────────────────────────
 
@@ -303,7 +306,6 @@ class SBILightningModule(L.LightningModule):
         checkpoint["epoch"] = self.current_epoch
 
         # Lets us load everything from a single checkpoint
-
         checkpoint["theta_dim"] = self.model.input_shape[0]
         checkpoint["theta_compressor"] = (
             self._theta_compressor.state_dict() if self._theta_compressor else None

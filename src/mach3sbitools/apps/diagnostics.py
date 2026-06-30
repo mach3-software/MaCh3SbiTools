@@ -38,7 +38,7 @@ def diagnostics_module(
     prior_path = Path(f"/tmp/{datetime.now()}_prior.pkl")
     prior.save(prior_path)
 
-    inference_handler = InferenceHandler(prior_path, nuisance_pars)
+    inference_handler = InferenceHandler(prior_path)
     inference_handler.load_posterior(Path(posterior))
 
     output_file = Path(output_file)

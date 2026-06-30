@@ -148,7 +148,7 @@ class TestSimulatorPersistence:
         theta, x = simulator.simulate(10)
         path = tmp_path / "data.feather"
         simulator.save(path, theta, x)
-        t, x2 = from_feather(path, simulator.prior.prior_data.parameter_names.tolist())
+        t, x2 = from_feather(path, simulator.prior.nuisance_filter)
         assert len(t) == len(x2) == 10
 
     def test_save_data_creates_parquet(self, dummy_config, tmp_path):

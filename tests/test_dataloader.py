@@ -5,15 +5,16 @@ Tests for mach3sbitools.data_loaders.ParaketDataset.
 import pytest
 import torch
 
-from mach3sbitools.data_loaders import ParaketDataset
+from mach3sbitools.data_loaders import TrainingDataset
+from mach3sbitools.simulator import create_prior
 from mach3sbitools.utils import TorchDeviceHandler
 
 device_handler = TorchDeviceHandler()
 
 
 @pytest.fixture(scope="session")
-def paraket_dataset(dummy_data_dir, test_consts):
-    return ParaketDataset(dummy_data_dir, test_consts.parameter_names)
+def paraket_dataset(dummy_data_dir, prior):
+    return TrainingDataset(dummy_data_dir, prior)
 
 
 class TestParaketDataset:
@@ -34,10 +35,13 @@ class TestParaketDataset:
             device_handler.to_tensor(theta), device_handler.to_tensor(test_consts.theta)
         )
 
-    def test_nuisance_filter_reduces_theta_dim(self, dummy_data_dir, test_consts):
-        filtered = ParaketDataset(
-            dummy_data_dir, test_consts.parameter_names, nuisance_params=["theta_1*"]
-        )
+    def test_nuisance_filter_reduces_theta_dim(
+        self, dummy_data_dir, simulator_injector, test_consts
+    ):
+
+        nuis_prior = create_prior(simulator_injector, nuisance_pars=["theta_1*"])
+        filtered = TrainingDataset(dummy_data_dir, nuis_prior)
+
         theta, _ = filtered[0]
         # theta_1, theta_10..theta_19 are 11 params — 30 - 11 = 19
         assert len(theta[0]) == test_consts.theta_dim - 11

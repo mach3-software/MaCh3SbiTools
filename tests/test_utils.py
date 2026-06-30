@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from mach3sbitools.utils.device_handler import TensorConversionError, TorchDeviceHandler
-from mach3sbitools.utils.file_utils import filter_nuisance, from_feather, to_feather
+from mach3sbitools.utils.file_utils import from_feather, to_feather
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TorchDeviceHandler
@@ -40,27 +40,6 @@ class TestTorchDeviceHandler:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# filter_nuisance
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TestFilterNuisance:
-    def test_removes_matching_columns(self):
-        theta = np.arange(10).reshape(2, 5).astype(np.float32)
-        names = ["keep_1", "drop_x", "keep_2", "drop_y", "keep_3"]
-        assert filter_nuisance(names, ["drop_*"], theta).shape == (2, 3)
-
-    def test_raises_on_length_mismatch(self):
-        with pytest.raises(ValueError):
-            filter_nuisance(["a", "b"], ["a"], np.ones((5, 3)))
-
-    def test_returns_unchanged_when_nuisance_is_none(self):
-        theta = np.ones((5, 3))
-        result = filter_nuisance(["a", "b", "c"], None, theta)
-        np.testing.assert_array_equal(result, theta)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Feather I/O
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -76,7 +55,7 @@ class TestFeatherIO:
 
     def test_round_trip_preserves_values(self, feather_file):
         path, theta, x = feather_file
-        t_out, x_out = from_feather(path, [f"p{i}" for i in range(4)])
+        t_out, x_out = from_feather(path)
         np.testing.assert_allclose(t_out, theta, rtol=1e-5)
         np.testing.assert_allclose(x_out, x, rtol=1e-5)
 
@@ -85,7 +64,9 @@ class TestFeatherIO:
         x = np.ones((10, 5), dtype=np.float32)
         path = tmp_path / "nuisance.feather"
         to_feather(path, theta, x)
-        t, _ = from_feather(path, ["keep", "drop_x", "keep2"], nuisance_pars=["drop_*"])
+        nuis_fil = np.ones(3, dtype=bool)
+        nuis_fil[-1] = False
+        t, _ = from_feather(path, nuisance_filter=nuis_fil)
         assert t.shape == (10, 2)
 
     def test_raises_on_wrong_suffix(self, tmp_path):
@@ -98,4 +79,4 @@ class TestFeatherIO:
 
     def test_raises_if_file_not_found(self):
         with pytest.raises(FileNotFoundError):
-            from_feather(Path("/no/such/file.feather"), ["a"])
+            from_feather(Path("/no/such/file.feather"))

@@ -78,7 +78,7 @@ class CompressedPriorWrapper(Distribution):
 
     def sample(
         self,
-        sample_shape: torch.Size | tuple[int, ...] = torch.Size(),
+        sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size(),
     ) -> torch.Tensor:
         """
         Sample from the original prior, then compress.

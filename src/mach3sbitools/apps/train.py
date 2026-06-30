@@ -15,11 +15,11 @@ warnings.filterwarnings("ignore", category=UserWarning, module=".*_pytree.*")
 warnings.filterwarnings("ignore", message=".*LeafSpec.*")
 warnings.filterwarnings("ignore", message=".*It is recommended to use.*")
 
+
 def train_module(
     save_file: Path,
     prior_path: Path,
     dataset: Path,
-    nuisance_pars: list[str],
     model: str,
     hidden: int,
     dropout: float,
@@ -98,7 +98,7 @@ def train_module(
     )
 
     # Dataset loading is always required — shared CPU tensor, single load.
-    handler = InferenceHandler(Path(prior_path), nuisance_pars)
+    handler = InferenceHandler(Path(prior_path))
     handler.set_dataset(Path(dataset))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     # All ranks must wait for rank 0 to finish loading before proceeding.

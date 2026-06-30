@@ -35,9 +35,7 @@ class PCACompressor(CompressorBase):
         return self._n_components
 
     def fit(self, data: torch.Tensor) -> "PCACompressor":
-        # Ensure data is on the correct device and is float
-        device = self.device_handler.device
-        data = data.to(device=device, dtype=torch.float32)
+        data = data.float()
         n_samples, n_features = data.shape
 
         if n_features < self._n_components:
@@ -46,8 +44,7 @@ class PCACompressor(CompressorBase):
             )
 
         if n_samples > self.subsample:
-            # Generate random permutation indices on the target device
-            idx = torch.randperm(n_samples, device=device)[: self.subsample]
+            idx = torch.randperm(n_samples)[: self.subsample]
             data = data[idx]
             logger.info(
                 f"PCA fitting on {self.subsample:,} subsampled rows "
@@ -61,7 +58,6 @@ class PCACompressor(CompressorBase):
         self.mean = data.mean(dim=0)
         centred = data - self.mean
 
-        # torch.pca_lowrank performs computations natively on whatever device 'centred' lives on
         _, S, V = torch.pca_lowrank(centred, q=self._n_components, niter=self.niter)
 
         self.components = V.T
@@ -82,10 +78,16 @@ class PCACompressor(CompressorBase):
         assert self.components is not None
         assert self.mean is not None
 
-        device = self.device_handler.device
-        data = data.to(device=device, dtype=torch.float32)
+        # 1. Identify where the incoming data lives (CPU or CUDA)
+        device = data.device
+        dtype = torch.float32
         
-        data, squeezed = self._unsqueeze_if_1d(data)
+        # 2. Dynamically shift the compressor parameters to match it
+        self.mean = self.mean.to(device=device, dtype=dtype)
+        self.components = self.components.to(device=device, dtype=dtype)
+
+        # 3. Perform the math safely on the same device
+        data, squeezed = self._unsqueeze_if_1d(data.to(dtype=dtype))
         out = (data - self.mean) @ self.components.T
         return self._squeeze_if_needed(out, squeezed)
 
@@ -96,13 +98,18 @@ class PCACompressor(CompressorBase):
         assert self.components is not None
         assert self.mean is not None
 
-        device = self.device_handler.device
-        data = data.to(device=device, dtype=torch.float32)
+        # 1. Identify where the incoming data lives (CPU or CUDA)
+        device = data.device
+        dtype = torch.float32
 
-        data, squeezed = self._unsqueeze_if_1d(data)
+        # 2. Dynamically shift the compressor parameters to match it
+        self.mean = self.mean.to(device=device, dtype=dtype)
+        self.components = self.components.to(device=device, dtype=dtype)
+
+        # 3. Perform the math safely on the same device
+        data, squeezed = self._unsqueeze_if_1d(data.to(dtype=dtype))
         out = data @ self.components + self.mean
         return self._squeeze_if_needed(out, squeezed)
-
     def explained_variance_ratio(self) -> torch.Tensor:
         if self.explained_variance is None:
             raise RuntimeError("PCACompressor is not fitted.")
@@ -128,15 +135,9 @@ class PCACompressor(CompressorBase):
             subsample=state["subsample"],
             niter=state["niter"],
         )
-        device = obj.device_handler.device
-        
-        # Helper to safely move tensors to the correct device if they exist
-        def to_device(tensor):
-            return tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
-
-        obj.mean = to_device(state["mean"])
-        obj.components = to_device(state["components"])
-        obj.explained_variance = to_device(state["explained_variance"])
+        obj.mean = state["mean"]
+        obj.components = state["components"]
+        obj.explained_variance = state["explained_variance"]
         obj._n_samples_fit = state["n_samples_fit"]
         obj._n_features = state["n_features"]
         return obj

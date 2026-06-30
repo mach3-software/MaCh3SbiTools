@@ -125,7 +125,7 @@ class Prior(torch.distributions.Distribution):
 
         # Apply nuisance filter once — masks are built against the filtered set
         # and cannot be safely remapped if the filter changes afterwards.
-        self._nuisance_filter = self._build_nuisance_filter(nuisance_parameters)
+        self.nuisance_filter = self._build_nuisance_filter(nuisance_parameters)
         self._priors: list[MaskDistributionMap] = []
 
         n_params = len(self.prior_data.nominals)
@@ -143,12 +143,15 @@ class Prior(torch.distributions.Distribution):
             )
 
         if any(cyclical_mask):
-            self._prior_data[self._nuisance_filter].lower_bounds[cyclical_mask] = (
-                -2 * torch.pi
+            # Mutate _prior_data directly, not a temporary slice
+            full_cyclical_mask = torch.zeros(
+                len(self._prior_data.parameter_names),
+                dtype=torch.bool,
+                device=self.device_handler.device
             )
-            self._prior_data[self._nuisance_filter].upper_bounds[cyclical_mask] = (
-                2 * torch.pi
-            )
+            full_cyclical_mask[self.nuisance_filter] = cyclical_mask
+            self._prior_data.lower_bounds[full_cyclical_mask] = -2 * torch.pi
+            self._prior_data.upper_bounds[full_cyclical_mask] = 2 * torch.pi
             self._priors.append(self._get_cyclical_map(cyclical_mask))
 
         # ── Flipped-uniform mask ───────────────────────────────────────────
@@ -176,8 +179,12 @@ class Prior(torch.distributions.Distribution):
         # ── Flat mask ──────────────────────────────────────────────────────
         # Guard against None so the tensor conversion doesn't crash.
         flat_msk = flat_msk if flat_msk is not None else [False] * n_params
+        
+        flat_msk_tensor = self.device_handler.to_tensor(flat_msk).bool()
+        flat_msk_filtered = flat_msk_tensor[self.nuisance_filter] 
+
         flat_mask = (
-            self.device_handler.to_tensor(flat_msk).bool()
+            flat_msk_filtered   
             & ~cyclical_mask
             & ~flipped_mask
         )
@@ -213,9 +220,15 @@ class Prior(torch.distributions.Distribution):
             )
 
         keep = [
-            not any(fnmatch.fnmatch(p, n) for n in nuisance_patterns)
+            not any(
+                (p == n) if "*" not in n and "?" not in n
+                else fnmatch.fnmatch(p, n)
+                for n in nuisance_patterns
+            )
             for p in self._prior_data.parameter_names
         ]
+
+
         return self.device_handler.to_tensor(keep)
 
     # ── Private distribution builders ──────────────────────────────────────────
@@ -308,7 +321,7 @@ class Prior(torch.distributions.Distribution):
     @property
     def prior_data(self) -> PriorData:
         """Active :class:`PriorData` after applying the nuisance filter."""
-        return self._prior_data[self._nuisance_filter]
+        return self._prior_data[self.nuisance_filter]
 
     @property
     def mean(self) -> torch.Tensor:
@@ -336,24 +349,14 @@ class Prior(torch.distributions.Distribution):
 
     @property
     def support(self):
-        class CheckBoundsConstraint(constraints.Constraint):
-            is_discrete = False
-            event_dim = 1
+        return constraints.independent(
+            constraints.interval(
+                self.effective_lower_bounds,
+                self.effective_upper_bounds,
+            ),
+            1,
+        )
 
-            def __init__(self_, prior):
-                self_._prior = prior
-                super().__init__()
-
-            def check(self_, value: torch.Tensor) -> torch.Tensor:
-                # check_bounds expects (n_samples, n_params) so unsqueeze if needed
-                if value.dim() == 1:
-                    return cast(
-                        torch.Tensor,
-                        self_._prior.check_bounds(value.unsqueeze(0)).squeeze(0),
-                    )
-                return cast(torch.Tensor, self_._prior.check_bounds(value))
-
-        return CheckBoundsConstraint(self)
 
     # ── Distribution interface ─────────────────────────────────────────────────
 
@@ -451,7 +454,7 @@ class Prior(torch.distributions.Distribution):
         self._prior_data = self._prior_data.to(device)
         for i, mask_map in enumerate(self._priors):
             self._priors[i] = mask_map.to(device)
-        self._nuisance_filter = self._nuisance_filter.to(device)
+        self.nuisance_filter = self.nuisance_filter.to(device)
         self._flipped_mask = self._flipped_mask.to(device)
         return self
 

@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, TensorDataset
 from tqdm import tqdm
 
 from mach3sbitools.utils import from_feather
-
+from mach3sbitools.simulator import Prior
 
 class ParaketDataset(Dataset):
     """
@@ -23,8 +23,7 @@ class ParaketDataset(Dataset):
     def __init__(
         self,
         data_folder: Path,
-        parameter_names: list[str],
-        nuisance_params: list[str] | None = None,
+        prior: Prior
     ):
         """
         :param data_folder: Directory containing ``.feather`` files.
@@ -39,8 +38,7 @@ class ParaketDataset(Dataset):
         self.data_folder = data_folder
 
         self.files = sorted(data_folder.glob("*.feather"))
-        self.nuisance_params = nuisance_params or None
-        self.parameter_names = parameter_names
+        self.prior = prior
 
     def __len__(self) -> int:
         """Number of feather files in the dataset folder."""
@@ -54,7 +52,7 @@ class ParaketDataset(Dataset):
         :returns: Tuple of ``(theta, x)`` float tensors.
         """
         theta, x = from_feather(
-            self.files[idx], self.parameter_names, self.nuisance_params
+            self.files[idx], self.prior.nuisance_filter
         )
         return torch.from_numpy(theta), torch.from_numpy(x)
 

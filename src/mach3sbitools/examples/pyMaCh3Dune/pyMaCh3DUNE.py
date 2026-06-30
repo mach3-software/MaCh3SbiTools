@@ -121,14 +121,21 @@ class pyMaCh3DUNESimulator:
         return self._parameter_properties_masked.covariance
 
     def get_log_likelihood(self, theta: list[float] | np.ndarray) -> float:
-        self._set_parameter_values(theta)
-        prior_llh: float = self.parameter_handler.calculate_likelihood()
-        if prior_llh > 1234567:
-            return float(-np.inf)
+        lower, upper = self.get_parameter_bounds()
+        if np.any(theta < lower) or np.any(theta > upper):
+            return -np.inf
 
-        sample_llh: float = np.sum([s.get_likelihood() for s in self.samples])
+        try:
+            self._set_parameter_values(theta)
+            prior_llh: float = self.parameter_handler.calculate_likelihood()
+            if prior_llh > 1234567:
+                return float(-np.inf)
 
-        return -sample_llh - prior_llh
+            sample_llh: float = np.sum([s.get_likelihood() for s in self.samples])
+
+            return -sample_llh - prior_llh
+        except RuntimeError:
+            return -np.inf
 
     # -----------------
     # Helpers

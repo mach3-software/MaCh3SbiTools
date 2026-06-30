@@ -6,11 +6,11 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import TypedDict
 
+import torch
 import numpy as np
 from pyarrow import Table, feather
 
 from mach3sbitools.types import SimulatorData, SimulatorDataGrouped
-
 
 class FeatherOutput(TypedDict):
     """Schema for feather files written by :func:`to_feather`."""
@@ -19,40 +19,41 @@ class FeatherOutput(TypedDict):
     theta: SimulatorData
 
 
-def filter_nuisance(
-    parameter_names: list[str], nuisance_pars: list[str], theta: SimulatorData
-) -> SimulatorData:
-    """
-    Remove nuisance parameters from a theta array by name pattern.
+# def filter_nuisance(
+#     parameter_names: list[str], nuisance_pars: list[str], theta: SimulatorData
+# ) -> SimulatorData:
+#     """
+#     Remove nuisance parameters from a theta array by name pattern.
 
-    :param parameter_names: Ordered parameter names, length must match
-        ``theta.shape[1]``.
-    :param nuisance_pars: fnmatch patterns for parameters to exclude
-        (e.g. ``["syst_*"]``).
-    :param theta: Parameter array of shape ``(n_samples, n_params)``.
-    :returns: Filtered array with nuisance columns removed.
-    :raises ValueError: If ``len(parameter_names) != theta.shape[1]``.
-    """
-    if len(theta[0]) != len(parameter_names):
-        raise ValueError("Parameter names and theta must have same length")
+#     :param parameter_names: Ordered parameter names, length must match
+#         ``theta.shape[1]``.
+#     :param nuisance_pars: fnmatch patterns for parameters to exclude
+#         (e.g. ``["syst_*"]``).
+#     :param theta: Parameter array of shape ``(n_samples, n_params)``.
+#     :returns: Filtered array with nuisance columns removed.
+#     :raises ValueError: If ``len(parameter_names) != theta.shape[1]``.
+#     """
 
-    if nuisance_pars is None:
-        return theta
+#     if nuisance_pars is None:
+#         if len(theta[0]) != len(parameter_names):
+#             raise ValueError("Parameter names and theta must have same length")
+#         return theta
 
-    param_filter = np.array(
-        [
-            not any(fnmatch(param, nuis) for nuis in nuisance_pars)
-            for param in parameter_names
-        ],
-        dtype=bool,
-    )
-    return theta[:, param_filter].copy()
+#     param_filter = np.array(
+#         [
+#             not any(fnmatch(param, nuis) for nuis in nuisance_pars)
+#             for param in parameter_names
+#         ],
+#         dtype=bool,
+#     )
+#     print(param_filter)
+    
+#     return theta[:, param_filter].copy()
 
 
 def from_feather(
     file_name: Path,
-    parameter_names: list[str],
-    nuisance_pars: list[str] | None = None,
+    nuisance_filter: torch.Tensor
 ) -> SimulatorDataGrouped:
     """
     Load a ``(theta, x)`` pair from a feather file.
@@ -74,8 +75,7 @@ def from_feather(
     theta = np.array(table["theta"].to_list(), dtype=np.float32)
     x = np.array(table["x"].to_list(), dtype=np.float32)
 
-    if nuisance_pars is not None:
-        theta = filter_nuisance(parameter_names, nuisance_pars, theta)
+    theta = theta[:, nuisance_filter.to('cpu').numpy()]
 
     return theta, x
 

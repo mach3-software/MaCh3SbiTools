@@ -420,7 +420,7 @@ class Prior(torch.distributions.Distribution):
         if self._flipped_mask.any():
             flipped_lb = self.prior_data.lower_bounds.to(params.device)
             in_gap = params.abs() < flipped_lb
-            in_bounds[:, self._flipped_mask] &= ~in_gap[:, self._flipped_mask]
+            in_bounds[..., self._flipped_mask] &= ~in_gap[..., self._flipped_mask]
 
         return self.device_handler.to_tensor(
             in_bounds.all(dim=-1)

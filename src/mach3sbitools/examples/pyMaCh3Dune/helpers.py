@@ -6,10 +6,10 @@ import numpy as np
 @dataclass
 class Systematic:
     name: str
-    error: float
-    nominal: float
-    bounds: tuple[float, float]
-    correlations: dict[str, float]
+    error: np.float64
+    nominal: np.float64
+    bounds: tuple[np.float64, np.float64]
+    correlations: dict[str, np.float64]
     flat_prior: bool
     fixed: bool
 
@@ -41,6 +41,15 @@ class ProcessedSystematics:
         return len(self.names)
 
 
+def get_corrected_covariance(parameter_handler):
+    covariance=parameter_handler.get_prior_cov()
+    for i in range(parameter_handler.get_n_pars()):
+        par_name = parameter_handler.get_fancy_par_name(i)
+        if par_name == 'delm2_12':
+            print(f"Correcting covariance for {par_name} to 0.0000018")
+            covariance[i,i] = 0.0000018**2
+    return covariance
+
 def process_parameters(parameter_handler) -> ProcessedSystematics:
     """
     Process a list of MaCh3 parameter handler YAML files.
@@ -55,21 +64,22 @@ def process_parameters(parameter_handler) -> ProcessedSystematics:
             [parameter_handler.get_fancy_par_name(i) for i in idx], dtype=object
         ),
         errors=np.fromiter(
-            (parameter_handler.get_par_error(i) for i in idx),
-            dtype=float,
+            (parameter_handler.get_par_error(i) if parameter_handler.get_fancy_par_name(i)!='delm2_12' else 0.0000018 for i in idx),
+            dtype=np.float64,
             count=n_systs,
         ),
+        
         nominals=np.fromiter(
-            (parameter_handler.get_par_init(i) for i in idx), dtype=float, count=n_systs
+            (parameter_handler.get_par_init(i) for i in idx), dtype=np.float64, count=n_systs
         ),
         lower_bounds=np.fromiter(
             (parameter_handler.get_lower_bound(i) for i in idx),
-            dtype=float,
+            dtype=np.float64,
             count=n_systs,
         ),
         upper_bounds=np.fromiter(
             (parameter_handler.get_upper_bound(i) for i in idx),
-            dtype=float,
+            dtype=np.float64,
             count=n_systs,
         ),
         flat_priors=np.fromiter(
@@ -80,5 +90,6 @@ def process_parameters(parameter_handler) -> ProcessedSystematics:
         fixed=np.fromiter(
             (parameter_handler.get_par_fixed(i) for i in idx), dtype=bool, count=n_systs
         ),
-        covariance=parameter_handler.get_prior_cov(),
+        covariance=get_corrected_covariance(parameter_handler),
     )
+    

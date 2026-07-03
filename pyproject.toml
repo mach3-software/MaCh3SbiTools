@@ -28,7 +28,8 @@ dependencies = [
     "sphinx",
     "importlib-metadata",
     "lightning",
-    "awkward[numba]"
+    "awkward[numba]",
+    "corner"
 ]
 
 [project.optional-dependencies]

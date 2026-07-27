@@ -154,6 +154,8 @@ class Prior(torch.distributions.Distribution):
             self._prior_data.upper_bounds[full_cyclical_mask] = 2 * torch.pi
             self._priors.append(self._get_cyclical_map(cyclical_mask))
 
+        self.cyclical_mask = cyclical_mask
+
         # ── Flipped-uniform mask ───────────────────────────────────────────
         if flipped_parameters:
             flipped_mask_ = [
@@ -424,8 +426,9 @@ class Prior(torch.distributions.Distribution):
 
         return self.device_handler.to_tensor(
             in_bounds.all(dim=-1)
-        )  # ── Persistence ────────────────────────────────────────────────────────────
+        )  
 
+    # ── Persistence ────────────────────────────────────────────────────────────
     def save(self, output_path: Path) -> None:
         """
         Pickle the prior to *output_path*.
@@ -453,8 +456,6 @@ class Prior(torch.distributions.Distribution):
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
-
-
 def _check_boundary(
     nominal: torch.Tensor,
     error: torch.Tensor,

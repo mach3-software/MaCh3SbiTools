@@ -112,7 +112,7 @@ class CyclicalDistribution(torch.distributions.Distribution):
         pdf = self.pdf(value)
         in_bounds = pdf > 1e-8
         log_p = torch.full(pdf.shape, -np.inf, dtype=torch.double, device=self.device)
-        log_p[in_bounds] = torch.log(pdf[in_bounds])
+        log_p[in_bounds] = -1 * torch.log(pdf[in_bounds])
         return log_p
 
     def _build_cdf_grid(

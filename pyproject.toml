@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "torch",
-    "sbi",
+    "sbi==0.26.1",
     "uproot",
     "matplotlib",
     "ipython",
@@ -28,7 +28,8 @@ dependencies = [
     "sphinx",
     "importlib-metadata",
     "lightning",
-    "awkward[numba]"
+    "awkward[numba]",
+    "corner"
 ]
 
 [project.optional-dependencies]

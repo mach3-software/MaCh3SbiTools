@@ -424,9 +424,7 @@ class Prior(torch.distributions.Distribution):
             in_gap = params.abs() < flipped_lb
             in_bounds[..., self._flipped_mask] &= ~in_gap[..., self._flipped_mask]
 
-        return self.device_handler.to_tensor(
-            in_bounds.all(dim=-1)
-        )  
+        return self.device_handler.to_tensor(in_bounds.all(dim=-1))
 
     # ── Persistence ────────────────────────────────────────────────────────────
     def save(self, output_path: Path) -> None:

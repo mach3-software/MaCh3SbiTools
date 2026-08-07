@@ -2,15 +2,17 @@ import numpy as np
 import torch
 from scipy.stats import truncnorm
 from torch.distributions import MultivariateNormal
+
 from mach3sbitools.utils import get_logger
 
 logger = get_logger()
+
 
 class TruncatedGaussianDistribution(MultivariateNormal):
     """
     Bounded multivariate Gaussian with exact sequential-conditional sampling.
 
-    This replaces the TransformedDistribution approach, avoiding exploding 
+    This replaces the TransformedDistribution approach, avoiding exploding
     tails (inverse-Jacobian issues) and preserving the true covariance matrix.
     """
 
@@ -25,7 +27,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         cov = (covariance + covariance.T) / 2.0
         jitter = 1e-9
         chol: torch.Tensor | None = None
-        
+
         for attempt in range(6):
             try:
                 chol = torch.linalg.cholesky(cov)
@@ -33,14 +35,14 @@ class TruncatedGaussianDistribution(MultivariateNormal):
             except Exception:
                 logger.warning(
                     "Covariance not positive definite (attempt %d); adding jitter",
-                    attempt + 1
+                    attempt + 1,
                 )
-                jitter =  jitter * torch.eye(
+                jitter = jitter * torch.eye(
                     len(mean), dtype=cov.dtype, device=cov.device
                 )
-                jitter[torch.diag(cov)*10<jitter] = 0
-                cov+=jitter
-                
+                jitter[torch.diag(cov) * 10 < jitter] = 0
+                cov += jitter
+
                 jitter *= 10
 
         if chol is None:
@@ -90,16 +92,16 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     ) -> torch.Tensor:
         """
         Draw exact samples via sequential conditional sampling.
-        
-        Iterates over dimensions. At each step, the conditional bounds are 
-        computed from already-sampled variables. A batch of 1-D truncated 
+
+        Iterates over dimensions. At each step, the conditional bounds are
+        computed from already-sampled variables. A batch of 1-D truncated
         normals is then sampled simultaneously via SciPy's inverse-CDF.
         """
         n_samples = int(np.prod(sample_shape)) if sample_shape else 1
         d = self._mean_np.shape[0]
 
-        L = self._L_np          # (d, d) lower-triangular
-        mu = self._mean_np      # (d,)
+        L = self._L_np  # (d, d) lower-triangular
+        mu = self._mean_np  # (d,)
         lower = self._lower_np  # (d,)
         upper = self._upper_np  # (d,)
 
@@ -113,8 +115,8 @@ class TruncatedGaussianDistribution(MultivariateNormal):
             else:
                 shift = z[:, :i] @ L[i, :i]  # (n,) — BLAS-2 gemv
 
-            sigma_i = L[i, i]            # conditional std (constant)
-            mu_i = mu[i] + shift         # (n,) conditional mean
+            sigma_i = L[i, i]  # conditional std (constant)
+            mu_i = mu[i] + shift  # (n,) conditional mean
 
             # ── Truncation bounds for x_i ─────────────────────────────────
             a = (lower[i] - mu_i) / sigma_i
@@ -142,7 +144,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     ) -> torch.Tensor:
         """
         Reparameterised sample (delegates to sample).
-        
+
         Provided to satisfy the PyTorch Distribution interface expected by sbi.
         Note: The Scipy sampling path is not strictly differentiable.
         """

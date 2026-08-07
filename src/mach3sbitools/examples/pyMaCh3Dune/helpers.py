@@ -42,13 +42,14 @@ class ProcessedSystematics:
 
 
 def get_corrected_covariance(parameter_handler):
-    covariance=parameter_handler.get_prior_cov()
+    covariance = parameter_handler.get_prior_cov()
     for i in range(parameter_handler.get_n_pars()):
         par_name = parameter_handler.get_fancy_par_name(i)
-        if par_name == 'delm2_12':
+        if par_name == "delm2_12":
             print(f"Correcting covariance for {par_name} to 0.0000018")
-            covariance[i,i] = 0.0000018**2
+            covariance[i, i] = 0.0000018**2
     return covariance
+
 
 def process_parameters(parameter_handler) -> ProcessedSystematics:
     """
@@ -64,13 +65,19 @@ def process_parameters(parameter_handler) -> ProcessedSystematics:
             [parameter_handler.get_fancy_par_name(i) for i in idx], dtype=object
         ),
         errors=np.fromiter(
-            (parameter_handler.get_par_error(i) if parameter_handler.get_fancy_par_name(i)!='delm2_12' else 0.0000018 for i in idx),
+            (
+                parameter_handler.get_par_error(i)
+                if parameter_handler.get_fancy_par_name(i) != "delm2_12"
+                else 0.0000018
+                for i in idx
+            ),
             dtype=np.float64,
             count=n_systs,
         ),
-        
         nominals=np.fromiter(
-            (parameter_handler.get_par_init(i) for i in idx), dtype=np.float64, count=n_systs
+            (parameter_handler.get_par_init(i) for i in idx),
+            dtype=np.float64,
+            count=n_systs,
         ),
         lower_bounds=np.fromiter(
             (parameter_handler.get_lower_bound(i) for i in idx),
@@ -92,4 +99,3 @@ def process_parameters(parameter_handler) -> ProcessedSystematics:
         ),
         covariance=get_corrected_covariance(parameter_handler),
     )
-    

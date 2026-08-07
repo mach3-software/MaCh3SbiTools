@@ -169,7 +169,13 @@ def build_posterior_view(
     run_button.on_click(run)
 
     ui = widgets.VBox(
-        [*list(sliders.values()), widgets.HTML("<hr>"), samples_slider, bins_slider, run_button]
+        [
+            *list(sliders.values()),
+            widgets.HTML("<hr>"),
+            samples_slider,
+            bins_slider,
+            run_button,
+        ]
     )
     display(ui, out)
 

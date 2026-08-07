@@ -28,6 +28,8 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from sbi.inference import NPE, DirectPosterior
 from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParameters
 from sbi.neural_nets import posterior_nn
+from sbi.samplers.rejection import rejection
+from sbi.utils.user_input_checks import process_x
 from torch.utils.data import TensorDataset
 
 from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
@@ -38,7 +40,6 @@ from mach3sbitools.data_processors import (
 )
 from mach3sbitools.simulator import CompressedPriorWrapper, load_prior
 from mach3sbitools.types import SimulatorData
-from sbi.utils.user_input_checks import process_x
 
 # SBI Tools
 from mach3sbitools.utils import (
@@ -51,9 +52,6 @@ from mach3sbitools.utils import (
 from .inference_utils import select_accelerator_and_strategy, select_model_kwargs
 from .lightning_module import SBILightningModule
 from .model_loader import ModelLoader
-
-from sbi.samplers.rejection import rejection
-
 
 # Standard boiler plate
 logger = get_logger()
@@ -326,61 +324,64 @@ class InferenceHandler:
             self.inference._prior = original_prior
 
     def sample_posterior(
-            self,
-            num_samples: int,
-            x: list[float] | np.ndarray,
-            **kwargs,
-        ) -> torch.Tensor:
-            logger.info(f"Sampling [bold]{num_samples:,}[/] points from posterior")
-            self.build_posterior()
-            if self.posterior is None:
-                raise ValueError("Train or load a density estimator first.")
+        self,
+        num_samples: int,
+        x: list[float] | np.ndarray,
+        **kwargs,
+    ) -> torch.Tensor:
+        logger.info(f"Sampling [bold]{num_samples:,}[/] points from posterior")
+        self.build_posterior()
+        if self.posterior is None:
+            raise ValueError("Train or load a density estimator first.")
 
-            x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
-            if self._x_compressor is not None:
-                x_tensor = self._x_compressor.transform(x_tensor).to(
-                    self.device_handler.device
-                )
+        x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
+        if self._x_compressor is not None:
+            x_tensor = self._x_compressor.transform(x_tensor).to(
+                self.device_handler.device
+            )
 
-            # ── Define the vectorized boundary force ──────────────────────────────
-            def strict_prior_mask(theta_proposed: torch.Tensor) -> torch.Tensor:
-                """Prior mask check"""
-                # If the flow is working in compressed space, decompress it to check actual bounds
-                if self._theta_compressor is not None:
-                    theta_checking = self._theta_compressor.inverse_transform(theta_proposed)
-                else:
-                    theta_checking = theta_proposed
-                    
-                # prior.check_bounds returns a tensor of 1s and 0s (on its own device)
-                # Convert to boolean and ensure it aligns with the sample's device
-                return self.prior.check_bounds(theta_checking).bool().to(theta_proposed.device)
-
-            # Inject rejection arguments into kwargs if not already overridden
-            kwargs.setdefault("sample_with", "rejection")
-            kwargs.setdefault("accept_reject_fn", strict_prior_mask)
-
-            # Posterior samples arrive in compressed space; decompress before returning.
-            # samples_compressed = cast(
-            #     torch.Tensor,
-            #     self.posterior.sample((num_samples,), x=x_tensor, **kwargs),
-            # )
-
-            samples_compressed = rejection.accept_reject_sample(
-                proposal=self.posterior.posterior_estimator.sample,
-                accept_reject_fn=lambda theta: strict_prior_mask(theta),
-                num_samples=num_samples,
-                show_progress_bars=kwargs.get("show_progress_bars", True),
-                max_sampling_batch_size=kwargs.get("max_sampling_batch_size", 10_000),
-                proposal_sampling_kwargs={"condition": process_x(x_tensor)},
-                alternative_method="build_posterior(..., sample_with='mcmc')",
-                max_sampling_time=kwargs.get("max_sampling_time", None),
-                return_partial_on_timeout=True,
-            )[0][:, 0]
-
-
+        # ── Define the vectorized boundary force ──────────────────────────────
+        def strict_prior_mask(theta_proposed: torch.Tensor) -> torch.Tensor:
+            """Prior mask check"""
+            # If the flow is working in compressed space, decompress it to check actual bounds
             if self._theta_compressor is not None:
-                return self._theta_compressor.inverse_transform(samples_compressed)
-            return samples_compressed
+                theta_checking = self._theta_compressor.inverse_transform(
+                    theta_proposed
+                )
+            else:
+                theta_checking = theta_proposed
+
+            # prior.check_bounds returns a tensor of 1s and 0s (on its own device)
+            # Convert to boolean and ensure it aligns with the sample's device
+            return (
+                self.prior.check_bounds(theta_checking).bool().to(theta_proposed.device)
+            )
+
+        # Inject rejection arguments into kwargs if not already overridden
+        kwargs.setdefault("sample_with", "rejection")
+        kwargs.setdefault("accept_reject_fn", strict_prior_mask)
+
+        # Posterior samples arrive in compressed space; decompress before returning.
+        # samples_compressed = cast(
+        #     torch.Tensor,
+        #     self.posterior.sample((num_samples,), x=x_tensor, **kwargs),
+        # )
+
+        samples_compressed = rejection.accept_reject_sample(
+            proposal=self.posterior.posterior_estimator.sample,
+            accept_reject_fn=lambda theta: strict_prior_mask(theta),
+            num_samples=num_samples,
+            show_progress_bars=kwargs.get("show_progress_bars", True),
+            max_sampling_batch_size=kwargs.get("max_sampling_batch_size", 10_000),
+            proposal_sampling_kwargs={"condition": process_x(x_tensor)},
+            alternative_method="build_posterior(..., sample_with='mcmc')",
+            max_sampling_time=kwargs.get("max_sampling_time", None),
+            return_partial_on_timeout=True,
+        )[0][:, 0]
+
+        if self._theta_compressor is not None:
+            return self._theta_compressor.inverse_transform(samples_compressed)
+        return samples_compressed
 
     def get_log_likelihood(
         self, theta: SimulatorData, x: list[float] | np.ndarray, **kwargs

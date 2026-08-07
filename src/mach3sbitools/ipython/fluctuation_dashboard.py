@@ -207,7 +207,17 @@ def build_fluctuation_view(
     run_button.on_click(run_fluctuate)
 
     ui = widgets.VBox(
-        [*list(sliders.values()), widgets.HTML("<hr>"), samples_slider, toys_slider, bins_slider, minmax_toggle, hist_fill, widgets.HTML("<hr>"), run_button]
+        [
+            *list(sliders.values()),
+            widgets.HTML("<hr>"),
+            samples_slider,
+            toys_slider,
+            bins_slider,
+            minmax_toggle,
+            hist_fill,
+            widgets.HTML("<hr>"),
+            run_button,
+        ]
     )
     display(ui, out)
 

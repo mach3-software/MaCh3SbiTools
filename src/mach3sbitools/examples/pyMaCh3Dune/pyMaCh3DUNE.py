@@ -51,7 +51,6 @@ class pyMaCh3DUNESimulator:
             [str(s) for s in systematic_configs]
         )
 
-
         # We'll use this in a minute! (contains everything about or systematic model!)
         self.parameter_properties = process_parameters(self.parameter_handler)
 

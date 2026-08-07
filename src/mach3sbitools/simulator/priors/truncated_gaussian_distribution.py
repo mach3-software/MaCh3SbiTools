@@ -25,7 +25,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     ) -> None:
         # ── Symmetrise + Cholesky with jitter fallback ─────────────────────
         cov = (covariance + covariance.T) / 2.0
-        jitter = 1e-9
+        jitter_amount = 1e-9
         chol: torch.Tensor | None = None
 
         for attempt in range(6):
@@ -37,7 +37,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
                     "Covariance not positive definite (attempt %d); adding jitter",
                     attempt + 1,
                 )
-                jitter = jitter * torch.eye(
+                jitter = jitter_amount * torch.eye(
                     len(mean), dtype=cov.dtype, device=cov.device
                 )
                 jitter[torch.diag(cov) * 10 < jitter] = 0

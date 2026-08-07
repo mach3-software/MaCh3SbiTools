@@ -1,5 +1,7 @@
 """Interactive posterior corner-plot dashboard."""
 
+from typing import Any
+
 import corner
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -106,7 +108,7 @@ def build_posterior_view(
                 plot_density=True,
             )
 
-            legend_handles = [
+            legend_handles: list[Any] = [
                 mpatches.Patch(
                     color=level_colors[num_levels - 1 - i],
                     alpha=0.7,
@@ -138,7 +140,7 @@ def build_posterior_view(
     def run(_=None) -> None:
         slider_values = [sliders[name].value for name in parameter_names]
         noms = apply_sliders_to_noms(ctx, slider_values, device_handler)
-        obs_new = wrapper.simulate(noms)
+        obs_new = wrapper.simulate(noms.tolist())
         current_n_samples = samples_slider.value
 
         posterior_samples = (

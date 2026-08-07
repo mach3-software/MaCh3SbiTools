@@ -133,7 +133,7 @@ def build_fluctuation_view(
 
         ax.hist(
             nominal_samps[:, i],
-            bins=bin_edges,
+            bins=bin_edges.tolist(),
             color="k",
             histtype="step",
             density=True,
@@ -166,7 +166,7 @@ def build_fluctuation_view(
     def run_fluctuate(_=None) -> None:
         slider_values = [sliders[name].value for name in parameter_names]
         noms = apply_sliders_to_noms(ctx, slider_values, device_handler)
-        obs_new = wrapper.simulate(noms)
+        obs_new = wrapper.simulate(noms.tolist())
 
         current_n_samples = samples_slider.value
         n_toys = toys_slider.value

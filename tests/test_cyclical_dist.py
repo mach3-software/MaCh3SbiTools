@@ -34,10 +34,13 @@ def test_log_prob(cyclical_distribution):
     theta = torch.tensor([[0.0], [10.0], [1.0]], dtype=torch.double)
     l_one = 0.5 * (np.sin(0.25 * (1 + 2 * np.pi)) ** 2) / np.pi
     expected = torch.tensor(
-        [[np.log(0.5 / np.pi)], [torch.tensor(np.float64("-inf"))], [np.log(l_one)]],
+        [[-np.log(0.5 / np.pi)], [torch.tensor(np.float64("-inf"))], [-np.log(l_one)]],
         dtype=torch.double,
     )
-    assert torch.allclose(cyclical_distribution.log_prob(theta), expected)
+
+    log_dist = cyclical_distribution.log_prob(theta)
+
+    assert torch.allclose(log_dist, expected)
 
 
 def test_cdf(cyclical_distribution):

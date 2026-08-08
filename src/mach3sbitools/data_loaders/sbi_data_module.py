@@ -3,21 +3,23 @@ PyTorch Lightning data module for SBI simulation datasets.
 
 Dataset sharing strategy
 ------------------------
-The ``TensorDataset`` passed to this module lives in **CPU RAM** and is
-**not copied per DDP rank**.  Lightning's built-in ``DistributedSampler``
-(activated automatically when ``strategy="ddp"``) gives each rank a
-disjoint slice of indices, so every GPU reads only its own share from the
-shared tensor without any inter-process data replication.
+This module accepts any :class:`~torch.utils.data.Dataset`; the right
+choice of ``num_workers`` depends on which kind is passed in.
 
-This is the correct pattern for in-memory datasets under DDP:
-
-* Each rank receives the full ``TensorDataset`` reference (shared memory).
-* ``DistributedSampler`` partitions the index space; ``pin_memory=True``
-  then pages only the required rows to GPU VRAM.
-* There is zero redundant I/O or memory duplication.
-
-``num_workers=0`` is kept throughout: spawning worker processes for an
-already-RAM-resident tensor would only add IPC overhead.
+* **In-memory (** :class:`~torch.utils.data.TensorDataset` **)** — the
+  tensors live in **CPU RAM** and are **not copied per DDP rank**.
+  Lightning's built-in ``DistributedSampler`` (activated automatically
+  when ``strategy="ddp"``) gives each rank a disjoint slice of indices, so
+  every GPU reads only its own share from the shared tensor without any
+  inter-process data replication. ``num_workers=0`` is usually best here —
+  spawning worker processes for an already-RAM-resident tensor only adds
+  IPC overhead.
+* **Streaming (** :class:`~mach3sbitools.data_loaders.StreamingFeatherDataset`
+  **)** — samples are read from disk on demand, so ``num_workers > 0`` is
+  what lets shard I/O for the *next* batch overlap with training on the
+  current one. ``DistributedSampler`` still works identically either way
+  (it only partitions indices, not data), so DDP needs no special handling
+  for either dataset kind.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import warnings
 
 import lightning as L
 import torch
-from torch.utils.data import DataLoader, Dataset, TensorDataset, random_split
+from torch.utils.data import DataLoader, Dataset, random_split
 
 from mach3sbitools.utils.config import TrainingConfig
 
@@ -44,17 +46,21 @@ warnings.filterwarnings(
 
 class SBIDataModule(L.LightningDataModule):
     """
-    Lightning data module over a pre-loaded ``(theta, x)`` dataset.
+    Lightning data module over a ``(theta, x)`` dataset.
 
-    The dataset is expected to have been pre-loaded into CPU RAM via
-    :meth:`~mach3sbitools.data_loaders.ParaketDataset.to_tensor_dataset`
-    before this module is constructed.
+    Works with either an in-memory :class:`~torch.utils.data.TensorDataset`
+    (produced by
+    :meth:`~mach3sbitools.data_loaders.TrainingDataset.to_tensor_dataset`)
+    or a disk-backed
+    :class:`~mach3sbitools.data_loaders.StreamingFeatherDataset` — see the
+    module docstring for how ``num_workers`` should differ between the two.
 
     Under DDP, Lightning automatically wraps each DataLoader's sampler in a
-    ``DistributedSampler``, which partitions the index space across ranks.
-    Because the underlying ``TensorDataset`` tensors are kept in CPU shared
-    memory (no ``.to(device)`` call on the dataset itself), each rank reads
-    only its own slice — no data is copied between processes.
+    ``DistributedSampler``, which partitions the index space across ranks —
+    this requires nothing dataset-specific: an in-memory dataset's shared
+    CPU tensor means each rank reads its own slice with no data copied
+    between processes, while a streaming dataset simply reads its slice's
+    shards from disk directly, independently per rank.
 
     .. note::
 
@@ -63,11 +69,11 @@ class SBIDataModule(L.LightningDataModule):
         seed, change it consistently across all ranks.
     """
 
-    def __init__(self, dataset: TensorDataset, config: TrainingConfig) -> None:
+    def __init__(self, dataset: Dataset, config: TrainingConfig) -> None:
         """
-        :param dataset: Pre-loaded ``(theta, x)`` :class:`~torch.utils.data.TensorDataset`
-            in CPU RAM, produced by
-            :meth:`~mach3sbitools.data_loaders.ParaketDataset.to_tensor_dataset`.
+        :param dataset: A ``(theta, x)`` :class:`~torch.utils.data.Dataset` —
+            either a pre-loaded :class:`~torch.utils.data.TensorDataset` or a
+            :class:`~mach3sbitools.data_loaders.StreamingFeatherDataset`.
         :param config: Training configuration supplying ``validation_fraction``
             and ``batch_size``.
         """

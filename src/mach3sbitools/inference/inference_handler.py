@@ -30,9 +30,14 @@ from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParamet
 from sbi.neural_nets import posterior_nn
 from sbi.samplers.rejection import rejection
 from sbi.utils.user_input_checks import process_x
-from torch.utils.data import TensorDataset
+from torch.utils.data import Dataset, TensorDataset
 
-from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
+from mach3sbitools.data_loaders import (
+    SBIDataModule,
+    StreamingFeatherDataset,
+    TrainingDataset,
+)
+from mach3sbitools.data_loaders.streaming_dataloader import CompressedDatasetWrapper
 from mach3sbitools.data_processors import (
     CompressorBase,
     compressor_factory,
@@ -89,67 +94,147 @@ class InferenceHandler:
         #         "Prior must have same nuisance params as inference handler!"
         #     )
 
-        self.dataset: TrainingDataset | None = None
+        self.dataset: TrainingDataset | StreamingFeatherDataset | None = None
+        self._streaming: bool = False
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
-        self._tensor_dataset: TensorDataset | None = None
+        self._tensor_dataset: Dataset | None = None
 
         # Compression for X/Theta
         self._theta_compressor: CompressorBase | None = None
         self._x_compressor: CompressorBase | None = None
 
-    def set_dataset(self, data_folder: Path) -> None:
+    def set_dataset(
+        self,
+        data_folder: Path,
+        streaming: bool = False,
+        cache_size: int = 8,
+    ) -> None:
         """
         Point the handler at a folder of ``.feather`` simulation files.
 
         :param data_folder: Directory containing ``.feather`` files.
+        :param streaming: If ``True``, use
+            :class:`~mach3sbitools.data_loaders.StreamingFeatherDataset`
+            so training reads directly from disk and never materialises the
+            full corpus in RAM — use this once ``n_simulations`` is too
+            large to comfortably fit in memory. If ``False`` (default),
+            falls back to the original eager
+            :class:`~mach3sbitools.data_loaders.TrainingDataset` path,
+            which concatenates every shard into RAM in
+            :meth:`load_training_data`.
+        :param cache_size: Only used when ``streaming=True`` — number of
+            decoded shards kept resident per DataLoader worker process (see
+            :class:`~mach3sbitools.data_loaders.StreamingFeatherDataset`).
         """
-        self.dataset = TrainingDataset(data_folder, self.prior)
-        logger.info(
-            f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
-        )
+        self._streaming = streaming
+        if streaming:
+            self.dataset = StreamingFeatherDataset(
+                data_folder, self.prior, cache_size=cache_size
+            )
+            logger.info(
+                f"Dataset set (streaming): [bold]{len(self.dataset)}[/] "
+                f"simulations in [cyan]{data_folder}[/]"
+            )
+        else:
+            self.dataset = TrainingDataset(data_folder, self.prior)
+            logger.info(
+                f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
+            )
 
     def load_training_data(self, verbose: bool = True) -> None:
         """..."""
         if self.dataset is None:
             raise ValueError("Call set_dataset() before load_training_data().")
-        self._tensor_dataset = self.dataset.to_tensor_dataset(
-            device="cpu", verbose=verbose
-        )
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
 
-    def fit_x_compressor(self, compressor: str, **kwargs):
+        if self._streaming:
+            # Already a lazy, row-level Dataset reading from disk on demand —
+            # nothing to eagerly materialise.
+            self._tensor_dataset = self.dataset
+            return
+
+        assert isinstance(self.dataset, TrainingDataset)
+        tensor_dataset = self.dataset.to_tensor_dataset(device="cpu", verbose=verbose)
+        for t in tensor_dataset.tensors:
+            t.share_memory_()
+        self._tensor_dataset = tensor_dataset
+
+    def _sample_for_fitting(
+        self, n: int, seed: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return up to *n* representative ``(theta, x)`` rows.
+
+        Used anywhere a bounded, representative sample is enough in place of
+        the full corpus — compressor fitting, and probing shapes/statistics
+        when building the density estimator — so neither step requires the
+        full dataset to already be resident in RAM. For the streaming
+        dataset this reads only the shards needed to cover *n* rows,
+        regardless of total dataset size; for the in-memory dataset it's a
+        cheap slice of the tensor already held.
+        """
+        if self._tensor_dataset is None:
+            raise ValueError("call load_training_data before sampling")
+
+        if isinstance(self._tensor_dataset, StreamingFeatherDataset):
+            return self._tensor_dataset.sample_rows(n, seed=seed)
+
+        assert isinstance(self._tensor_dataset, TensorDataset)
+        theta, x = self._tensor_dataset.tensors
+        n = min(n, theta.shape[0])
+        return theta[:n], x[:n]
+
+    def fit_x_compressor(self, compressor: str, subsample: int = 2_000_000, **kwargs):
         """
         Compress X dim
         """
-
         if self._tensor_dataset is None:
             raise ValueError("call load_training_data before fitting compressor")
 
-        _, x = self._tensor_dataset.tensors
+        _, x = self._sample_for_fitting(subsample)
         self._x_compressor = compressor_factory(compressor, **kwargs).fit(x)
         logger.info(f"Fitted x with {compressor}")
 
-    def fit_theta_compressor(self, compressor: str, **kwargs):
+    def fit_theta_compressor(
+        self, compressor: str, subsample: int = 2_000_000, **kwargs
+    ):
         """
         Compress theta dim
         """
         if self._tensor_dataset is None:
             raise ValueError("call load_training_data before fitting compressor")
 
-        theta, _ = self._tensor_dataset.tensors
+        theta, _ = self._sample_for_fitting(subsample)
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
         logger.info(f"Fitted theta with {compressor}")
 
     def _apply_compression(self) -> None:
         """
-        Apply fitted compressors to the tensor dataset in-place.
+        Apply fitted compressors to the training dataset.
+
+        For the in-memory path this rebuilds the ``TensorDataset`` with
+        compressed tensors, exactly as before. For the streaming path the
+        full corpus is never materialised, so compression is instead
+        applied lazily per-item via
+        :class:`~mach3sbitools.data_loaders.CompressedDatasetWrapper` —
+        the transform is just a mean-subtract + matmul, cheap enough to do
+        on each batch as it's produced.
         """
         if self._tensor_dataset is None:
             raise ValueError("call load_training_data before applying compression")
 
+        if not self._theta_compressor and not self._x_compressor:
+            return
+
+        if isinstance(self._tensor_dataset, StreamingFeatherDataset):
+            self._tensor_dataset = CompressedDatasetWrapper(
+                self._tensor_dataset, self._theta_compressor, self._x_compressor
+            )
+            logger.info("Compression will be applied per-batch (streaming dataset).")
+            return
+
+        assert isinstance(self._tensor_dataset, TensorDataset)
         theta, x = self._tensor_dataset.tensors
 
         if self._theta_compressor:
@@ -489,9 +574,7 @@ class InferenceHandler:
 
         # Use a large representative batch for accurate z-score statistics
         # 10 samples (the previous value) gives wildly inaccurate mean/std
-        n_probe = min(100_000, self._tensor_dataset.tensors[0].shape[0])
-        sample_theta = self._tensor_dataset.tensors[0][:n_probe]
-        sample_x = self._tensor_dataset.tensors[1][:n_probe]
+        sample_theta, sample_x = self._sample_for_fitting(100_000)
         return cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:

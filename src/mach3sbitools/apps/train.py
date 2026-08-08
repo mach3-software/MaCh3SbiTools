@@ -46,6 +46,8 @@ def train_module(
     compress_theta: bool,
     compress_x_components: int,
     compress_theta_components: int,
+    streaming: bool = False,
+    cache_size: int = 8,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -71,6 +73,12 @@ def train_module(
             -r prior.pkl -d sims/ -s models/run.pt \\
             --resume_checkpoint models/last.ckpt \\
             --max_epochs 50000 --stop_after_epochs 200
+
+    Streaming (dataset too large for RAM)::
+
+        mach3sbi train \\
+            -r prior.pkl -d sims/ -s models/run.pt --streaming \\
+            --num_workers 4 --cache_size 8
     """
     logger = get_logger()
 
@@ -97,11 +105,17 @@ def train_module(
         prune_model=prune_model,
     )
 
-    # Dataset loading is always required — shared CPU tensor, single load.
+    if streaming and num_workers == 0:
+        logger.warning(
+            "--streaming with --num_workers 0 means shard reads happen "
+            "synchronously in the main process — set --num_workers >= 1 "
+            "so disk I/O overlaps with training."
+        )
+
     handler = InferenceHandler(Path(prior_path))
-    handler.set_dataset(Path(dataset))
+    handler.set_dataset(Path(dataset), streaming=streaming, cache_size=cache_size)
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    # All ranks must wait for rank 0 to finish loading before proceeding.
+    # All ranks must wait for rank 0 to finish loading/indexing before proceeding.
     handler.load_training_data(local_rank == 0)
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()

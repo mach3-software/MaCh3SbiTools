@@ -83,8 +83,8 @@ def select_model_kwargs(config: PosteriorConfig) -> dict:
     dropped = set(all_kwargs) - set(filtered)
     if dropped:
         logger.debug(
-            f"Model '%s' does not accept {sorted(dropped)}; "
-            "these kwargs were dropped from the posterior_nn call.",
+            "Model '%s' does not accept %s; these kwargs were dropped from the posterior_nn call.",
             config.model,
+            sorted(dropped),
         )
     return filtered

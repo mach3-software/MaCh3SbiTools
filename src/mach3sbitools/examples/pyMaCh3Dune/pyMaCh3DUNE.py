@@ -11,12 +11,18 @@ from .helpers import process_parameters
 try:
     from pyMaCh3_DUNE import parameters, samples
 
+    # NOTE: assuming `Manager` is exposed from the core pyMaCh3 module as
+    # `pyMaCh3.manager.Manager` (not from pyMaCh3_DUNE). Adjust this import
+    # to match wherever your core bindings actually expose it.
+    from pyMaCh3.manager import Manager
+
     HAS_PYMACH3 = True
 except ImportError:
     HAS_PYMACH3 = False
 
 if TYPE_CHECKING:
     from pyMaCh3_DUNE import parameters, samples
+    from pyMaCh3.manager import Manager
 
 from mach3sbitools.utils.logger import get_logger
 
@@ -69,8 +75,10 @@ class pyMaCh3DUNESimulator:
         # Saves doing this every time!
         self._parameter_properties_masked = self.parameter_properties[~self._fixed_mask]
 
-        # Now we load in the samples
-        self.samples = self._get_sample_handlers(yaml_cfg, self.parameter_handler)
+        # Now we load in the samples via the C++ factory, so the sample-type
+        # dispatch (BeamFD / BeamND / Atm / BeamNDGAr), oscillation handler
+        # setup, and ND covariance loading all live in one place.
+        self.samples = self._get_sample_handlers(fitter_config, self.parameter_handler)
 
         self._data = np.concatenate(
             [
@@ -143,22 +151,23 @@ class pyMaCh3DUNESimulator:
     @classmethod
     def _get_sample_handlers(
         cls,
-        yaml_cfg: dict,
+        fitter_config: Path,
         parameter_handler: parameters.ParameterHandlerGeneric,
     ) -> list[samples.SampleHandlerBase]:
         """
-        Load in the samples from the MaCh3 fitter config
-        :param yaml_cfg: Main config
-        :param parameter_handler: A list of fitter configs
-        :return:
-        """
-        sample_files = yaml_cfg.get("General", {}).get("DUNESamples")
-        if sample_files is None:
-            raise ValueError("DUNESamples is required in fitter config")
+        Load in the samples from the MaCh3 fitter config via the C++
+        MaCh3DuneSampleFactory, which reads General:DUNESamples itself,
+        dispatches on each sample's SampleHandlerName (BeamFD / BeamND /
+        Atm / BeamNDGAr), and sets up any shared oscillation handlers and
+        ND covariance objects needed along the way.
 
-        return [
-            samples.SampleHandlerBeamFD(str(s), parameter_handler) for s in sample_files
-        ]
+        :param fitter_config: path to the MaCh3 fitter config (same one
+            used to build `parameter_handler`)
+        :param parameter_handler: parameter handler to associate with the samples
+        :return: list of constructed SampleHandlerBase instances
+        """
+        fit_manager = Manager(str(fitter_config))
+        return samples.MaCh3DuneSampleFactory(fit_manager, parameter_handler)
 
     def _set_parameter_values(self, theta: list[float] | np.ndarray):
         """

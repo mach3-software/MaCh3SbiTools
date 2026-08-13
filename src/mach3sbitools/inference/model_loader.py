@@ -59,6 +59,25 @@ class ModelLoader:
             torch.load(self.model_path, map_location="cpu", weights_only=False),
         )
 
+    def load_into(self, model: torch.nn.Module) -> None:
+        """
+        Load this checkpoint's weights into ``model`` in place.
+
+        Works whether ``model`` is a plain module or has already been
+        FSDP2-sharded (e.g. via ``configure_model`` under
+        ``ModelParallelStrategy``) — sharded parameters are correctly
+        re-sharded from the full state dict rather than requiring an
+        exact DTensor-for-DTensor match.
+
+        :param model: Target module to load weights into.
+        """
+        is_sharded = any(type(p).__name__ == "DTensor" for p in model.parameters())
+        if is_sharded:
+            options = StateDictOptions(full_state_dict=True, broadcast_from_rank0=True)
+            set_model_state_dict(model, self.state_dict, options=options)
+        else:
+            model.load_state_dict(self.state_dict)
+
     @property
     def x_dim(self) -> int:
         """Get x-dimension from saved checkpoint"""

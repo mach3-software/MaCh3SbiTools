@@ -23,9 +23,9 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         lower_bounds: torch.Tensor,
         upper_bounds: torch.Tensor,
     ) -> None:
-        # ── Symmetrise + Cholesky with jitter fallback ─────────────────────
+        # ── Symmetrise + Cholesky with eigenvalue-floor fallback ───────────
         cov = (covariance + covariance.T) / 2.0
-        jitter_amount = 1e-9
+        min_eig_floor = 1e-9
         chol: torch.Tensor | None = None
 
         for attempt in range(6):
@@ -34,16 +34,20 @@ class TruncatedGaussianDistribution(MultivariateNormal):
                 break
             except Exception:
                 logger.warning(
-                    "Covariance not positive definite (attempt %d); adding jitter",
+                    "Covariance not positive definite (attempt %d); "
+                    "clipping eigenvalues to floor",
                     attempt + 1,
                 )
-                jitter = jitter_amount * torch.eye(
-                    len(mean), dtype=cov.dtype, device=cov.device
-                )
-                jitter[torch.diag(cov) * 10 < jitter] = 0
-                cov += jitter
+                eigvals, eigvecs = torch.linalg.eigh(cov)
 
-                jitter *= 10
+                # Raise the floor each retry in case clipping alone isn't
+                # enough (e.g. numerical noise reintroduces small negatives
+                # after reconstruction).
+                floor = min_eig_floor * (10.0**attempt)
+                eigvals_clipped = torch.clamp(eigvals, min=floor)
+
+                cov = (eigvecs * eigvals_clipped) @ eigvecs.T
+                cov = (cov + cov.T) / 2.0  # re-symmetrise after reconstruction
 
         if chol is None:
             raise ValueError(
@@ -60,7 +64,6 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         self._upper_np: np.ndarray = upper_bounds.detach().cpu().numpy()
 
         super().__init__(loc=mean, scale_tril=chol)
-
     # ── Bounds helper ───────────────────────────────────────────────────────
 
     def in_bounds(self, value: torch.Tensor) -> torch.Tensor:

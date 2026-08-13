@@ -7,6 +7,9 @@ import time
 import lightning as L
 import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
+from torch.distributed._composable.fsdp import fully_shard
+
 
 from mach3sbitools.data_processors import CompressorBase
 from mach3sbitools.utils import PosteriorConfig, TrainingConfig
@@ -86,6 +89,19 @@ class SBILightningModule(L.LightningModule):
         self._theta_compressor = theta_compressor
 
     # ── Forward ───────────────────────────────────────────────────────────────
+    def configure_model(self) -> None:
+        """Apply FSDP2 sharding for ModelParallelStrategy."""
+        if self.device_mesh is None:
+            return  # not using ModelParallelStrategy — nothing to do
+
+        # Shard leaf modules first, then the top-level model.
+        # Adjust the module types below to match your density estimator's
+        # actual submodules (e.g. its flow transform blocks / MLPs).
+        for module in self.model.modules():
+            if isinstance(module, (torch.nn.Linear,)):
+                fully_shard(module, mesh=self.device_mesh)
+
+        fully_shard(self.model, mesh=self.device_mesh)
 
     def forward(self, theta: torch.Tensor, x: torch.Tensor):
         """
@@ -200,6 +216,8 @@ class SBILightningModule(L.LightningModule):
 
         self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
 
+
+
     # ── Validation ────────────────────────────────────────────────────────────
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
@@ -301,7 +319,8 @@ class SBILightningModule(L.LightningModule):
     # ── Checkpoint ────────────────────────────────────────────────────────────
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         """Embed model weights, architecture config, and epoch into checkpoint."""
-        checkpoint["model_state"] = self.model.state_dict()
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+        checkpoint["model_state"] = get_model_state_dict(self.model, options=options)
         checkpoint["model_config"] = self.model_config
         checkpoint["epoch"] = self.current_epoch
 

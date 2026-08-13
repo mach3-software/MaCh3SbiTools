@@ -1,13 +1,17 @@
 """
 Feather file I/O utilities for simulation data.
+
+Files are written uncompressed so they can be memory-mapped and read
+lazily; compressed feather files must be fully decompressed on open.
 """
 
 from pathlib import Path
 from typing import TypedDict
 
 import numpy as np
+import pyarrow as pa
 import torch
-from pyarrow import Table, feather
+from pyarrow import Table, feather, ipc, memory_map
 
 from mach3sbitools.types import SimulatorData, SimulatorDataGrouped
 
@@ -17,38 +21,6 @@ class FeatherOutput(TypedDict):
 
     x: SimulatorData
     theta: SimulatorData
-
-
-# def filter_nuisance(
-#     parameter_names: list[str], nuisance_pars: list[str], theta: SimulatorData
-# ) -> SimulatorData:
-#     """
-#     Remove nuisance parameters from a theta array by name pattern.
-
-#     :param parameter_names: Ordered parameter names, length must match
-#         ``theta.shape[1]``.
-#     :param nuisance_pars: fnmatch patterns for parameters to exclude
-#         (e.g. ``["syst_*"]``).
-#     :param theta: Parameter array of shape ``(n_samples, n_params)``.
-#     :returns: Filtered array with nuisance columns removed.
-#     :raises ValueError: If ``len(parameter_names) != theta.shape[1]``.
-#     """
-
-#     if nuisance_pars is None:
-#         if len(theta[0]) != len(parameter_names):
-#             raise ValueError("Parameter names and theta must have same length")
-#         return theta
-
-#     param_filter = np.array(
-#         [
-#             not any(fnmatch(param, nuis) for nuis in nuisance_pars)
-#             for param in parameter_names
-#         ],
-#         dtype=bool,
-#     )
-#     print(param_filter)
-
-#     return theta[:, param_filter].copy()
 
 
 def from_feather(
@@ -69,19 +41,17 @@ def from_feather(
     if not file_name.exists():
         raise FileNotFoundError(file_name)
 
-    table = feather.read_feather(str(file_name))
-    theta = np.array(table["theta"].to_list(), dtype=np.float32)
-    x = np.array(table["x"].to_list(), dtype=np.float32)
+    with memory_map(str(file_name), "r") as source:
+        table = ipc.open_file(source).read_all()
+        theta = _column_to_2d(table["theta"]).astype(np.float32, copy=True)
+        x = _column_to_2d(table["x"]).astype(np.float32, copy=True)
 
-    # HW : Don't love the nesting, but oh well
     if nuisance_filter is not None:
         if isinstance(nuisance_filter, torch.Tensor):
             nuisance_filter = nuisance_filter.to("cpu").numpy()
-
         theta = theta[:, nuisance_filter]
 
     return theta, x
-
 
 def to_feather(
     file_name: Path,
@@ -108,4 +78,46 @@ def to_feather(
     }
     param_table = Table.from_pydict(param_dict)
     file_name.parent.mkdir(parents=True, exist_ok=True)
-    feather.write_feather(param_table, str(file_name))
+    feather.write_feather(param_table, str(file_name), compression="uncompressed")
+
+
+def peek_num_rows(file_name: Path) -> int:
+    """Read a feather file's row count from its footer, without loading data."""
+    if not isinstance(file_name, Path):
+        file_name = Path(file_name)
+
+    with memory_map(str(file_name), "r") as source:
+        return ipc.open_file(source).read_all().num_rows
+
+
+def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
+    """Convert a fixed-width list column into a 2D numpy array (near zero-copy)."""
+    arr = column.combine_chunks()
+    n_rows = len(arr)
+    flat = arr.flatten().to_numpy(zero_copy_only=False)
+    n_features = flat.shape[0] // n_rows
+    return flat.reshape(n_rows, n_features)
+
+
+class FeatherFileHandle:
+    """
+    A memory-mapped feather file, exposing ``theta``/``x`` as numpy arrays
+    backed by the mmap. Requires the file to have been written with
+    ``compression="uncompressed"``.
+    """
+
+    __slots__ = ("path", "_source", "theta", "x")
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._source = memory_map(str(self.path), "r")
+        table = ipc.open_file(self._source).read_all()
+        self.theta = _column_to_2d(table["theta"])
+        self.x = _column_to_2d(table["x"])
+
+    @property
+    def num_rows(self) -> int:
+        return self.theta.shape[0]
+
+    def close(self) -> None:
+        self._source.close()

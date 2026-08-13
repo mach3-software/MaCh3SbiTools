@@ -55,7 +55,7 @@ from .model_loader import ModelLoader
 
 # Standard boiler plate
 logger = get_logger()
-# torch.set_float32_matmul_precision("medium")
+torch.set_float32_matmul_precision("medium")
 
 torch.serialization.add_safe_globals(
     [
@@ -496,7 +496,7 @@ class InferenceHandler:
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:
         """Construct a Lightning Trainer from *config*."""
-        acc, strat = select_accelerator_and_strategy()
+        acc, strat = select_accelerator_and_strategy(use_model_parallel=True)
         tb_logger = (
             TensorBoardLogger(save_dir=str(config.tensorboard_dir))
             if config.tensorboard_dir

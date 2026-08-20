@@ -30,9 +30,9 @@ from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParamet
 from sbi.neural_nets import posterior_nn
 from sbi.samplers.rejection import rejection
 from sbi.utils.user_input_checks import process_x
-from torch.utils.data import TensorDataset
+from torch.utils.data import Dataset
 
-from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
+from mach3sbitools.data_loaders import CompressedDataset, SBIDataModule, TrainingDataset
 from mach3sbitools.data_processors import (
     CompressorBase,
     compressor_factory,
@@ -93,7 +93,12 @@ class InferenceHandler:
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
-        self._tensor_dataset: TensorDataset | None = None
+        # The dataset actually handed to SBIDataModule for training. Starts
+        # out as the raw lazily-loading TrainingDataset (set in
+        # load_training_data); becomes a CompressedDataset wrapper once
+        # _apply_compression() runs. Never a fully-materialized tensor --
+        # rows are read on demand by DataLoader workers.
+        self._training_dataset: Dataset | None = None
 
         # Compression for X/Theta
         self._theta_compressor: CompressorBase | None = None
@@ -111,61 +116,94 @@ class InferenceHandler:
         )
 
     def load_training_data(self, verbose: bool = True) -> None:
-        """..."""
+        """
+        Prepare the training dataset for use.
+
+        This used to materialize every row into a single in-RAM
+        ``TensorDataset`` -- fine for small datasets, but it doesn't scale
+        to O(1TB) simulation sets against a bounded RAM budget. It now just
+        points training at the lazily-loading, memory-mapped dataset built
+        by :meth:`set_dataset`: individual rows are read on demand by
+        ``DataLoader`` workers (mmap + OS page cache) instead of being
+        pre-loaded here. Kept as an explicit step, separate from
+        :meth:`set_dataset`, for backward compatibility with existing call
+        sites (e.g. ``train.py`` calling it once per-rank behind a barrier).
+
+        :param verbose: Log dataset size on completion.
+        """
         if self.dataset is None:
             raise ValueError("Call set_dataset() before load_training_data().")
-        self._tensor_dataset = self.dataset.to_tensor_dataset(
-            device="cpu", verbose=verbose
-        )
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
+
+        self._training_dataset = self.dataset
+        if verbose:
+            n_files = len(self.dataset.files)
+            logger.info(
+                f"Training data ready: [bold]{len(self.dataset):,}[/] rows "
+                f"across [cyan]{n_files}[/] files "
+                "(lazily loaded via mmap, not materialized in RAM)"
+            )
 
     def fit_x_compressor(self, compressor: str, **kwargs):
         """
-        Compress X dim
+        Compress X dim.
+
+        Fits on a bounded random subsample drawn directly from the lazy
+        dataset (not the full O(1TB) set) -- PCA components stabilize long
+        before the whole dataset is needed. Pass ``subsample=N`` to control
+        how many rows are drawn; defaults to the compressor's own default
+        (2,000,000 for PCA).
         """
+        if self.dataset is None:
+            raise ValueError("call set_dataset before fitting compressor")
 
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
-
-        _, x = self._tensor_dataset.tensors
+        n_rows = kwargs.get("subsample", 2_000_000)
+        _, x = self.dataset.random_subsample(n_rows)
         self._x_compressor = compressor_factory(compressor, **kwargs).fit(x)
-        logger.info(f"Fitted x with {compressor}")
+        logger.info(f"Fitted x with {compressor} on {x.shape[0]:,} subsampled rows")
 
     def fit_theta_compressor(self, compressor: str, **kwargs):
         """
-        Compress theta dim
-        """
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+        Compress theta dim.
 
-        theta, _ = self._tensor_dataset.tensors
+        See :meth:`fit_x_compressor` -- fits on a bounded random subsample
+        rather than the full dataset.
+        """
+        if self.dataset is None:
+            raise ValueError("call set_dataset before fitting compressor")
+
+        n_rows = kwargs.get("subsample", 2_000_000)
+        theta, _ = self.dataset.random_subsample(n_rows)
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
-        logger.info(f"Fitted theta with {compressor}")
+        logger.info(
+            f"Fitted theta with {compressor} on {theta.shape[0]:,} subsampled rows"
+        )
 
     def _apply_compression(self) -> None:
         """
-        Apply fitted compressors to the tensor dataset in-place.
+        Wire fitted compressors in as an on-the-fly transform.
+
+        Unlike the old in-place tensor transform, this never materializes a
+        compressed copy of the dataset: each row is compressed at read
+        time by :class:`~mach3sbitools.data_loaders.CompressedDataset`,
+        which wraps whatever ``self._training_dataset`` currently is
+        (typically the lazy, memory-mapped ``TrainingDataset``).
         """
-        if self._tensor_dataset is None:
+        if self._training_dataset is None:
             raise ValueError("call load_training_data before applying compression")
 
-        theta, x = self._tensor_dataset.tensors
+        if self._theta_compressor is None and self._x_compressor is None:
+            logger.info("No compressors fitted; training on raw theta/x.")
+            return
 
-        if self._theta_compressor:
-            theta = self._theta_compressor.transform(theta)
-        if self._x_compressor:
-            x = self._x_compressor.transform(x)
-
-        # Rebuild the dataset so downstream consumers see the compressed tensors.
-        self._tensor_dataset = TensorDataset(theta, x)
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
-
+        self._training_dataset = CompressedDataset(
+            self._training_dataset,
+            theta_compressor=self._theta_compressor,
+            x_compressor=self._x_compressor,
+        )
         logger.info(
-            "After compression — theta shape: %s | x shape: %s",
-            tuple(theta.shape),
-            tuple(x.shape),
+            "Compression wired in as an on-the-fly transform | "
+            f"theta_compressor={'yes' if self._theta_compressor else 'no'} "
+            f"x_compressor={'yes' if self._x_compressor else 'no'}"
         )
 
     def create_posterior(self, config: PosteriorConfig) -> None:
@@ -214,7 +252,7 @@ class InferenceHandler:
         :param model_config: Architecture config embedded in every checkpoint.
         :raises ValueError: If training data or the NPE object are missing.
         """
-        if self._tensor_dataset is None:
+        if self._training_dataset is None:
             raise ValueError("Call load_training_data() before train_posterior().")
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
@@ -251,7 +289,7 @@ class InferenceHandler:
         ckpt_path: str | None,
     ) -> None:
         """Internal: run the Lightning training loop."""
-        assert self._tensor_dataset is not None
+        assert self._training_dataset is not None
 
         lightning_module = SBILightningModule(
             density_estimator,
@@ -268,7 +306,7 @@ class InferenceHandler:
             )
             torch.compile(lightning_module)
 
-        data_module = SBIDataModule(self._tensor_dataset, config)
+        data_module = SBIDataModule(self._training_dataset, config)
         trainer = self._build_trainer(config)
 
         # TODO: Uncomment when lightning allows for ddp batched training and LR with multiple optimizers
@@ -485,13 +523,23 @@ class InferenceHandler:
     def _build_density_estimator_from_inference(self) -> nn.Module:
         if self.inference is None:
             raise ValueError("inference is None — call create_posterior() first.")
-        assert self._tensor_dataset is not None
+        assert self.dataset is not None
 
         # Use a large representative batch for accurate z-score statistics
-        # 10 samples (the previous value) gives wildly inaccurate mean/std
-        n_probe = min(100_000, self._tensor_dataset.tensors[0].shape[0])
-        sample_theta = self._tensor_dataset.tensors[0][:n_probe]
-        sample_x = self._tensor_dataset.tensors[1][:n_probe]
+        # (10 samples, the previous default, gives wildly inaccurate mean/std).
+        # Drawn as a bounded subsample from the lazy dataset rather than
+        # sliced from a fully-materialized tensor.
+        n_probe = min(100_000, len(self.dataset))
+        sample_theta, sample_x = self.dataset.random_subsample(n_probe)
+
+        # _apply_compression() only affects self._training_dataset (the
+        # on-the-fly wrapper); replicate the same transform here so the
+        # z-score probe sees data in the same space the network will train on.
+        if self._theta_compressor is not None:
+            sample_theta = self._theta_compressor.transform(sample_theta)
+        if self._x_compressor is not None:
+            sample_x = self._x_compressor.transform(sample_x)
+
         return cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:

@@ -66,7 +66,7 @@ class TestInferenceHandlerErrorPaths:
         with pytest.raises(ValueError):
             InferenceHandler(prior_save).load_training_data()
 
-    def test_train_posterior_requires_tensor_dataset(
+    def test_train_posterior_requires_training_dataset(
         self, prior_save, posterior_config, training_config
     ):
         handler = InferenceHandler(prior_save)
@@ -76,7 +76,9 @@ class TestInferenceHandlerErrorPaths:
 
     def test_train_posterior_requires_inference(self, prior_save, training_config):
         handler = InferenceHandler(prior_save)
-        handler._tensor_dataset = TensorDataset(torch.zeros(10, 4), torch.zeros(10, 6))
+        handler._training_dataset = TensorDataset(
+            torch.zeros(10, 4), torch.zeros(10, 6)
+        )
         with pytest.raises(ValueError, match="create_posterior"):
             handler.train_posterior(training_config)
 
@@ -118,7 +120,7 @@ class TestInferenceHandlerHappyPath:
         handler.set_dataset(dummy_data_dir)
         assert handler.dataset is not None
         handler.load_training_data()
-        assert handler._tensor_dataset is not None
+        assert handler._training_dataset is not None
         handler.create_posterior(posterior_config)
         assert handler.inference is not None
 
@@ -171,8 +173,9 @@ class TestInferenceHandlerCheckpoints:
         ckpt_path = tmp_path / "de.pt"
         torch.save(trained_handler._density_estimator.state_dict(), ckpt_path)
 
-        theta_dim = trained_handler._tensor_dataset.tensors[0].shape[1]
-        x_dim = trained_handler._tensor_dataset.tensors[1].shape[1]
+        sample_theta, sample_x = trained_handler.dataset.random_subsample(1)
+        theta_dim = sample_theta.shape[1]
+        x_dim = sample_x.shape[1]
 
         loaded = InferenceHandler(prior_save)
         loaded.create_posterior(posterior_config)

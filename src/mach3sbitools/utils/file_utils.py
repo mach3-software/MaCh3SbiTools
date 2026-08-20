@@ -6,7 +6,7 @@ lazily; compressed feather files must be fully decompressed on open.
 """
 
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import numpy as np
 import pyarrow as pa
@@ -53,6 +53,7 @@ def from_feather(
 
     return theta, x
 
+
 def to_feather(
     file_name: Path,
     theta_values: SimulatorData,
@@ -87,7 +88,7 @@ def peek_num_rows(file_name: Path) -> int:
         file_name = Path(file_name)
 
     with memory_map(str(file_name), "r") as source:
-        return ipc.open_file(source).read_all().num_rows
+        return cast(int, ipc.open_file(source).read_all().num_rows)
 
 
 def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
@@ -106,7 +107,7 @@ class FeatherFileHandle:
     ``compression="uncompressed"``.
     """
 
-    __slots__ = ("path", "_source", "theta", "x")
+    __slots__ = ("_source", "path", "theta", "x")
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -117,7 +118,7 @@ class FeatherFileHandle:
 
     @property
     def num_rows(self) -> int:
-        return self.theta.shape[0]
+        return cast(int, self.theta.shape[0])
 
     def close(self) -> None:
         self._source.close()

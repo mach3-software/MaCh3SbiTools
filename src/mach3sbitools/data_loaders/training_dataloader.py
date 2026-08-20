@@ -45,7 +45,7 @@ class TrainingDataset(Dataset):
 
         self.prior = prior
         self.lengths = [peek_num_rows(f) for f in self.files]
-        self.cumsum = np.cumsum([0] + self.lengths)
+        self.cumsum = np.cumsum([0, *self.lengths])
         self._handles: dict[int, FeatherFileHandle] = {}
 
     def __len__(self) -> int:
@@ -99,6 +99,31 @@ class TrainingDataset(Dataset):
         for handle in self._handles.values():
             handle.close()
         self._handles.clear()
+
+    def random_subsample(
+        self, n: int, generator: torch.Generator | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Materialize a random subsample of *n* rows without loading the
+        full dataset into RAM.
+
+        Intended for cases that legitimately need an in-memory tensor over
+        a *bounded* number of rows -- fitting a PCA compressor, or probing
+        z-score statistics for network initialisation -- even when the
+        full dataset (potentially O(1TB)) does not fit in RAM.
+
+        :param n: Number of rows to sample. Capped at ``len(self)``.
+        :param generator: Optional ``torch.Generator`` for reproducibility.
+        :returns: ``(theta, x)`` tensors of shape ``(min(n, len(self)), ...)``.
+        """
+        n = min(n, len(self))
+        idx = torch.randperm(len(self), generator=generator)[:n].tolist()
+        theta_rows, x_rows = [], []
+        for i in idx:
+            theta, x = self[i]
+            theta_rows.append(theta)
+            x_rows.append(x)
+        return torch.stack(theta_rows, dim=0), torch.stack(x_rows, dim=0)
 
     def to_tensor_dataset(
         self, device: str = "cpu", verbose: bool = True

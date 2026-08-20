@@ -266,7 +266,9 @@ class TestInferenceHandlerLightning:
 
         # No inference object
         handler2 = InferenceHandler(prior_save)
-        handler2._tensor_dataset = TensorDataset(torch.zeros(10, 4), torch.zeros(10, 6))
+        handler2._training_dataset = TensorDataset(
+            torch.zeros(10, 4), torch.zeros(10, 6)
+        )
         with pytest.raises(ValueError, match="create_posterior"):
             handler2.train_posterior(training_config)
 

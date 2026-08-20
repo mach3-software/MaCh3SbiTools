@@ -49,3 +49,24 @@ class TestParaketDataset:
     def test_tensor_dataset_total_length(self, paraket_dataset, test_consts):
         ds = paraket_dataset.to_tensor_dataset()
         assert len(ds) == test_consts.n_files * test_consts.n_simulations
+
+    def test_random_subsample_shapes_and_cap(self, paraket_dataset, test_consts):
+        n_total = len(paraket_dataset)
+
+        theta, x = paraket_dataset.random_subsample(5)
+        assert theta.shape[0] == 5
+        assert x.shape[0] == 5
+        assert theta.shape[1] == test_consts.theta_dim
+
+        # Requesting more rows than exist should cap at the dataset length,
+        # not raise or loop forever.
+        theta_all, x_all = paraket_dataset.random_subsample(n_total + 1000)
+        assert theta_all.shape[0] == n_total
+        assert x_all.shape[0] == n_total
+
+    def test_random_subsample_is_reproducible_with_generator(self, paraket_dataset):
+        gen1 = torch.Generator().manual_seed(123)
+        gen2 = torch.Generator().manual_seed(123)
+        theta_a, _ = paraket_dataset.random_subsample(5, generator=gen1)
+        theta_b, _ = paraket_dataset.random_subsample(5, generator=gen2)
+        torch.testing.assert_close(theta_a, theta_b)

@@ -36,7 +36,7 @@ import warnings
 
 import lightning as L
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, IterableDataset, random_split
 
 from mach3sbitools.utils.config import TrainingConfig
 
@@ -72,17 +72,45 @@ class SBIDataModule(L.LightningDataModule):
         seed, change it consistently across all ranks.
     """
 
-    def __init__(self, dataset: Dataset, config: TrainingConfig) -> None:
+    def __init__(
+        self,
+        dataset: Dataset,
+        config: TrainingConfig,
+        val_dataset: Dataset | None = None,
+    ) -> None:
         """
-        :param dataset: A map-style ``(theta, x)`` :class:`~torch.utils.data.Dataset`,
-            e.g. a :class:`~mach3sbitools.data_loaders.LazyFeatherDataset`
-            or a pre-loaded :class:`~torch.utils.data.TensorDataset`.
+        :param dataset: A ``(theta, x)`` dataset. Either a map-style
+            :class:`~torch.utils.data.Dataset` (e.g. a pre-loaded
+            :class:`~torch.utils.data.TensorDataset`, or a lazily-loading,
+            memory-mapped :class:`~mach3sbitools.data_loaders.TrainingDataset`)
+            which is split into train/val internally via
+            :func:`~torch.utils.data.random_split`; or a
+            :class:`~torch.utils.data.IterableDataset` (e.g.
+            :class:`~mach3sbitools.data_loaders.ShuffleBufferDataset`) for
+            datasets too large to index/shuffle globally, in which case
+            *val_dataset* must be supplied separately (map-style or
+            iterable) since iterable datasets can't be split by index.
         :param config: Training configuration supplying ``validation_fraction``
             and ``batch_size``.
+        :param val_dataset: Validation dataset, required when *dataset* is
+            an :class:`~torch.utils.data.IterableDataset`. Ignored (and
+            unnecessary) for map-style datasets, which are split internally.
+        :raises ValueError: If *dataset* is an ``IterableDataset`` and
+            *val_dataset* is not supplied.
         """
         super().__init__()
         self.dataset = dataset
         self.config = config
+
+        if isinstance(dataset, IterableDataset) and val_dataset is None:
+            raise ValueError(
+                "val_dataset is required when dataset is an IterableDataset "
+                "(e.g. ShuffleBufferDataset) -- it can't be split by index "
+                "like a map-style dataset. Split shards into separate "
+                "train/val folders (or file lists) up front and pass the "
+                "val shards' dataset here."
+            )
+        self._val_dataset_override = val_dataset
 
         # Specifically still save the batch size
         self.batch_size = config.batch_size
@@ -101,6 +129,15 @@ class SBIDataModule(L.LightningDataModule):
             message=".*LeafSpec.*",
             category=UserWarning,
         )
+
+        if isinstance(self.dataset, IterableDataset):
+            # Streaming datasets manage their own shuffling internally and
+            # can't be sliced by index -- train/val must already be
+            # disjoint shard sets by the time they're passed in.
+            self.train_dataset = self.dataset
+            self.val_dataset = self._val_dataset_override
+            return
+
         n_val = int(len(self.dataset) * self.config.validation_fraction)
         n_train = len(self.dataset) - n_val
         self.train_dataset, self.val_dataset = random_split(
@@ -119,10 +156,14 @@ class SBIDataModule(L.LightningDataModule):
     ) -> DataLoader:
         """Shared factory to avoid duplicating DataLoader kwargs."""
         use_workers = self.config.num_workers > 0
+        is_iterable = isinstance(dataset, IterableDataset)
         return DataLoader(
             dataset,
             batch_size=self.config.batch_size * batch_multiplier,
-            shuffle=shuffle,
+            # IterableDataset does its own shuffling internally (see
+            # ShuffleBufferDataset) -- the DataLoader must not be asked to
+            # shuffle an iterable source, it doesn't support it.
+            shuffle=False if is_iterable else shuffle,
             drop_last=drop_last,
             num_workers=self.config.num_workers,
             pin_memory=True,
@@ -132,10 +173,22 @@ class SBIDataModule(L.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         """
-        Training data loader
+        Training data loader.
+
+        .. note::
+            If ``self.train_dataset`` exposes ``set_epoch`` (e.g.
+            :class:`~mach3sbitools.data_loaders.ShuffleBufferDataset`), it
+            is called with the current ``trainer.current_epoch`` so shard
+            order and in-shard shuffling change each epoch. Lightning only
+            re-invokes ``train_dataloader()`` every epoch when the trainer
+            is constructed with ``reload_dataloaders_every_n_epochs=1``;
+            without that, a streaming dataset re-streams the same order
+            every epoch.
         """
         if self.train_dataset is None:
             raise RuntimeError("Training set has not been set; call setup() first.")
+        if hasattr(self.train_dataset, "set_epoch") and self.trainer is not None:
+            self.train_dataset.set_epoch(self.trainer.current_epoch)
         return self._make_dataloader(self.train_dataset, shuffle=True, drop_last=True)
 
     def val_dataloader(self) -> DataLoader:

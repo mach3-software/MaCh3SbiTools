@@ -6,9 +6,12 @@ from pathlib import Path
 
 import h5py
 from tqdm.rich import tqdm
+from tqdm import TqdmExperimentalWarning
+import warnings
 
 from mach3sbitools.utils import from_feather, get_logger, peek_num_rows
 
+warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
 def merge_shards_module(simulation_dir: Path, output_file: Path):
     """
@@ -30,7 +33,7 @@ def merge_shards_module(simulation_dir: Path, output_file: Path):
     )
 
     n_rows = 0
-    for shard in sims_files:
+    for shard in tqdm(sims_files, desc="Counting number of rows"): 
         n_rows += peek_num_rows(shard)
 
     # We now peak the first entry
@@ -42,10 +45,10 @@ def merge_shards_module(simulation_dir: Path, output_file: Path):
 
     del t_test, x_test
 
-    with h5py.File(output_file) as f:
+    with h5py.File(output_file, "w") as f:
         # We now create separate x and theta dataset
-        theta_dset = f.create_dataset("theta", (t_dim, n_rows))
-        x_dset = f.create_dataset("x", (x_dim, n_rows))
+        theta_dset = f.create_dataset("theta", (n_rows, t_dim), dtype=float)
+        x_dset = f.create_dataset("x", (n_rows, x_dim), dtype=float)
 
         # Now we append the data set to the hdf5 file
         desc_str = f"Adding sims to {output_file} | current file: "

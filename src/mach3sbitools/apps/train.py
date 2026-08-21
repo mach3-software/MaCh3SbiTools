@@ -100,9 +100,7 @@ def train_module(
     # Dataset loading is always required — shared CPU tensor, single load.
     handler = InferenceHandler(Path(prior_path))
     handler.set_dataset(Path(dataset))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     # All ranks must wait for rank 0 to finish loading before proceeding.
-    handler.load_training_data(local_rank == 0)
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()
 

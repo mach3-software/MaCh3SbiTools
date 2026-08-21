@@ -93,8 +93,7 @@ class InferenceHandler:
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
-        self._tensor_dataset: TensorDataset | None = None
-
+        
         # Compression for X/Theta
         self._theta_compressor: CompressorBase | None = None
         self._x_compressor: CompressorBase | None = None
@@ -105,30 +104,31 @@ class InferenceHandler:
 
         :param data_folder: Directory containing ``.feather`` files.
         """
-        self.dataset = TrainingDataset(data_folder, self.prior)
+        
+        x_data = data_folder/'x.npy'
+        theta_data = data_folder/'theta.npy'
+        
+        if not x_data.is_file():
+            raise FileNotFoundError(f"Cannot find x data file: {x_data}")
+
+        if not theta_data.is_file():
+            raise FileNotFoundError(f"Cannot find theta data file: {theta_data}")
+
+        
+        self.dataset = TrainingDataset(theta_data, x_data, self.prior)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
         )
-
-    def load_training_data(self, verbose: bool = True) -> None:
-        """..."""
-        if self.dataset is None:
-            raise ValueError("Call set_dataset() before load_training_data().")
-        self._tensor_dataset = self.dataset.to_tensor_dataset(
-            device="cpu", verbose=verbose
-        )
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
 
     def fit_x_compressor(self, compressor: str, **kwargs):
         """
         Compress X dim
         """
 
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+        assert self.dataset is not None
+        n_probe = min(100000, len(self.dataset))
+        _, x = self.dataset[:n_probe]
 
-        _, x = self._tensor_dataset.tensors
         self._x_compressor = compressor_factory(compressor, **kwargs).fit(x)
         logger.info(f"Fitted x with {compressor}")
 
@@ -136,10 +136,11 @@ class InferenceHandler:
         """
         Compress theta dim
         """
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+        if self.dataset is None:
+            raise ValueError("No data provided")
 
-        theta, _ = self._tensor_dataset.tensors
+        n_probe = min(100000, len(self.dataset))
+        theta, _ = self.dataset[:n_probe]
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
         logger.info(f"Fitted theta with {compressor}")
 
@@ -147,10 +148,11 @@ class InferenceHandler:
         """
         Apply fitted compressors to the tensor dataset in-place.
         """
-        if self._tensor_dataset is None:
+        if self.dataset is None:
             raise ValueError("call load_training_data before applying compression")
+        n_probe = min(100000, len(self.dataset))
 
-        theta, x = self._tensor_dataset.tensors
+        theta, x = self.dataset[:n_probe]
 
         if self._theta_compressor:
             theta = self._theta_compressor.transform(theta)
@@ -158,9 +160,6 @@ class InferenceHandler:
             x = self._x_compressor.transform(x)
 
         # Rebuild the dataset so downstream consumers see the compressed tensors.
-        self._tensor_dataset = TensorDataset(theta, x)
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
 
         logger.info(
             "After compression — theta shape: %s | x shape: %s",
@@ -214,8 +213,7 @@ class InferenceHandler:
         :param model_config: Architecture config embedded in every checkpoint.
         :raises ValueError: If training data or the NPE object are missing.
         """
-        if self._tensor_dataset is None:
-            raise ValueError("Call load_training_data() before train_posterior().")
+        assert self.dataset
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
 
@@ -251,7 +249,7 @@ class InferenceHandler:
         ckpt_path: str | None,
     ) -> None:
         """Internal: run the Lightning training loop."""
-        assert self._tensor_dataset is not None
+        assert self.dataset
 
         lightning_module = SBILightningModule(
             density_estimator,
@@ -268,16 +266,9 @@ class InferenceHandler:
             )
             torch.compile(lightning_module)
 
-        data_module = SBIDataModule(self._tensor_dataset, config)
+        data_module = SBIDataModule(self.dataset, config)
         trainer = self._build_trainer(config)
 
-        # TODO: Uncomment when lightning allows for ddp batched training and LR with multiple optimizers
-        # Currently LR decay is more effective than finding the perfect initial LR
-
-        # Set up tuning to get good initial LR + batch size that uses the optimal amount of memory!
-        # tuner = Tuner(trainer)
-        # tuner.scale_batch_size(lightning_module, mode="power", datamodule=data_module)
-        # tuner.lr_find(lightning_module, datamodule=data_module)
 
         trainer.fit(lightning_module, datamodule=data_module, ckpt_path=ckpt_path)
 
@@ -485,18 +476,17 @@ class InferenceHandler:
     def _build_density_estimator_from_inference(self) -> nn.Module:
         if self.inference is None:
             raise ValueError("inference is None — call create_posterior() first.")
-        assert self._tensor_dataset is not None
+        assert self.dataset is not None
 
         # Use a large representative batch for accurate z-score statistics
         # 10 samples (the previous value) gives wildly inaccurate mean/std
-        n_probe = min(100_000, self._tensor_dataset.tensors[0].shape[0])
-        sample_theta = self._tensor_dataset.tensors[0][:n_probe]
-        sample_x = self._tensor_dataset.tensors[1][:n_probe]
+        n_probe = min(100_000, len(self.dataset))
+        sample_theta, sample_x = self.dataset[:n_probe]
         return cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:
         """Construct a Lightning Trainer from *config*."""
-        acc, strat = select_accelerator_and_strategy(use_model_parallel=True)
+        acc, strat = select_accelerator_and_strategy(use_model_parallel=False)
         tb_logger = (
             TensorBoardLogger(save_dir=str(config.tensorboard_dir))
             if config.tensorboard_dir
@@ -510,8 +500,9 @@ class InferenceHandler:
             gradient_clip_val=20.0,
             enable_progress_bar=config.show_progress,
             log_every_n_steps=50,
-            strategy=strat,
+            strategy="auto",
             accelerator=acc,
             devices="auto",
-            num_nodes=int(os.environ.get("§URM_NNODES", 1)),
+            num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
+            num_sanity_val_steps=0
         )

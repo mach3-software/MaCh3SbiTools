@@ -101,13 +101,18 @@ class SBIDataModule(L.LightningDataModule):
             message=".*LeafSpec.*",
             category=UserWarning,
         )
+        # n_val = int(len(self.dataset) * self.config.validation_fraction)
+        # n_train = len(self.dataset) - n_val
+        # self.train_dataset, self.val_dataset = random_split(
+        #     self.dataset,
+        #     [n_train, n_val],
+        #     generator=torch.Generator().manual_seed(42),
+        # )
         n_val = int(len(self.dataset) * self.config.validation_fraction)
         n_train = len(self.dataset) - n_val
-        self.train_dataset, self.val_dataset = random_split(
-            self.dataset,
-            [n_train, n_val],
-            generator=torch.Generator().manual_seed(42),
-        )
+        indices = torch.arange(len(self.dataset))
+        self.train_dataset = torch.utils.data.Subset(self.dataset, indices[:n_train])
+        self.val_dataset = torch.utils.data.Subset(self.dataset, indices[n_train:])
 
     def _make_dataloader(
         self,
@@ -127,7 +132,7 @@ class SBIDataModule(L.LightningDataModule):
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=use_workers,
-            prefetch_factor=5 if use_workers else None,
+            prefetch_factor=2 if use_workers else None,
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -136,7 +141,7 @@ class SBIDataModule(L.LightningDataModule):
         """
         if self.train_dataset is None:
             raise RuntimeError("Training set has not been set; call setup() first.")
-        return self._make_dataloader(self.train_dataset, shuffle=True, drop_last=True)
+        return self._make_dataloader(self.train_dataset, shuffle=False, drop_last=True)
 
     def val_dataloader(self) -> DataLoader:
         """
@@ -145,5 +150,5 @@ class SBIDataModule(L.LightningDataModule):
         if self.val_dataset is None:
             raise RuntimeError("Validation set has not been set; call setup() first.")
         return self._make_dataloader(
-            self.val_dataset, shuffle=False, batch_multiplier=4
+            self.val_dataset, shuffle=False
         )

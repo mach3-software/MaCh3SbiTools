@@ -45,7 +45,7 @@ class TrainingDataset(Dataset):
 
         self.prior = prior
         self.lengths = [peek_num_rows(f) for f in self.files]
-        self.cumsum = np.cumsum([0] + self.lengths)
+        self.cumsum = np.cumsum([0, *self.lengths])
         self._handles: dict[int, FeatherFileHandle] = {}
 
     def __len__(self) -> int:

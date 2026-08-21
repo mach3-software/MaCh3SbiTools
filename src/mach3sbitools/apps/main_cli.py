@@ -12,6 +12,7 @@ from mach3sbitools.utils import (
 from .diagnostics import diagnostics_module
 from .importance_sample import importance_sample_module
 from .inference import inference as inference_module
+from .merge_shards import merge_shards_module
 from .save_data import save_data_module
 from .save_prior import save_prior_module
 from .simulate import simulate_module
@@ -724,3 +725,10 @@ def diagnostics(
         n_prior_samples,
         n_posterior_samples,
     )
+
+
+@cli.command(short_help="Merge feather files")
+@click.option("--simulation_dir", "-s")
+@click.option("--output_file", "-o")
+def merge_shards(simulation_dir: Path, output_file: Path):
+    merge_shards_module(Path(simulation_dir), Path(output_file))

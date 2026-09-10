@@ -181,3 +181,13 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
         :returns: Sampled tensor of shape ``(*sample_shape, event_size)``.
         """
         return self.sample(sample_shape)
+
+    def to(self, device: torch.device | str) -> "FlippedUniformDistribution":
+        """Move cached tensors to *device* in-place."""
+        self.device = torch.device(device)
+        self.nominals = self.nominals.to(device)
+        self._lower = self._lower.to(device)
+        self._upper = self._upper.to(device)
+        self._width = self._width.to(device)
+        self._pdf_val = self._pdf_val.to(device)
+        return self

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from mach3sbitools.utils import TorchDeviceHandler
+
 
 @dataclass(eq=False, repr=False)
 class PriorData(torch.nn.Module):
@@ -31,6 +33,34 @@ class PriorData(torch.nn.Module):
 
     def __post_init__(self):
         super().__init__()
+        self._check_device()
+
+    def _check_device(self):
+        handler = TorchDeviceHandler()
+        if self.nominals.device == handler.device:
+            return
+
+        self.nominals = handler.to_tensor(self.nominals)
+        self.covariance_matrix = handler.to_tensor(self.covariance_matrix)
+        self.lower_bounds = handler.to_tensor(self.lower_bounds)
+        self.upper_bounds = handler.to_tensor(self.upper_bounds)
+
+    def to(self, device: torch.device | str) -> "PriorData":
+        """
+        Move all tensor fields to *device* in-place.
+
+        Overrides :meth:`torch.nn.Module.to`, which only recurses into
+        registered parameters/buffers/submodules and would otherwise leave
+        these plain tensor attributes untouched.
+
+        :param device: Target PyTorch device.
+        :returns: ``self``, for chaining.
+        """
+        self.nominals = self.nominals.to(device)
+        self.covariance_matrix = self.covariance_matrix.to(device)
+        self.lower_bounds = self.lower_bounds.to(device)
+        self.upper_bounds = self.upper_bounds.to(device)
+        return self
 
     def __getitem__(self, mask: torch.Tensor) -> "PriorData":
         """
@@ -39,11 +69,18 @@ class PriorData(torch.nn.Module):
         :param mask: Boolean tensor of shape ``(n_params,)``.
         :returns: New :class:`PriorData` containing only the selected parameters.
         """
+        self._check_device()
         np_mask = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
+        handler = TorchDeviceHandler()
+        # Match the mask to wherever this instance's data actually lives,
+        # rather than trusting handler.device — avoids CPU/CUDA mismatches
+        # if this PriorData was moved independently of the global handler.
+        tensor_mask = handler.to_tensor(mask).to(self.nominals.device)
+
         return PriorData(
             parameter_names=self.parameter_names[np_mask],
-            nominals=self.nominals[mask],
-            covariance_matrix=self.covariance_matrix[mask][:, mask],
-            lower_bounds=self.lower_bounds[mask],
-            upper_bounds=self.upper_bounds[mask],
+            nominals=self.nominals[tensor_mask],
+            covariance_matrix=self.covariance_matrix[tensor_mask][:, tensor_mask],
+            lower_bounds=self.lower_bounds[tensor_mask],
+            upper_bounds=self.upper_bounds[tensor_mask],
         )

@@ -11,6 +11,7 @@ import lightning
 
 # Non-builtin but standard
 import numpy as np
+from tqdm.auto import tqdm
 
 # Torch
 import torch
@@ -79,7 +80,7 @@ class InferenceHandler:
         :param prior_path: Path to a pickled :class:`~mach3sbitools.simulator.Prior`.
         """
         self.device_handler = TorchDeviceHandler()
-        self.prior = load_prior(prior_path)  # .to(self.device_handler.device)
+        self.prior = load_prior(prior_path).to(self.device_handler.device)
         self.parameter_names = self.prior.prior_data.parameter_names
 
         # if len(
@@ -326,6 +327,7 @@ class InferenceHandler:
             raise ValueError("Train or load a density estimator first.")
 
         x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
+                
         if self._x_compressor is not None:
             x_tensor = self._x_compressor.transform(x_tensor).to(
                 self.device_handler.device
@@ -357,7 +359,7 @@ class InferenceHandler:
         #     torch.Tensor,
         #     self.posterior.sample((num_samples,), x=x_tensor, **kwargs),
         # )
-
+        
         samples_compressed = rejection.accept_reject_sample(
             proposal=self.posterior.posterior_estimator.sample,
             accept_reject_fn=lambda theta: strict_prior_mask(theta),
@@ -368,7 +370,7 @@ class InferenceHandler:
             alternative_method="build_posterior(..., sample_with='mcmc')",
             max_sampling_time=kwargs.get("max_sampling_time", None),
             return_partial_on_timeout=True,
-        )[0][:, 0]
+        )[0]
 
         if self._theta_compressor is not None:
             return self._theta_compressor.inverse_transform(samples_compressed)
@@ -506,3 +508,56 @@ class InferenceHandler:
             num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
             num_sanity_val_steps=0
         )
+
+    def sample_posterior_chunked(
+        self,
+        num_samples_per_x: int,
+        x: list[float] | np.ndarray,
+        chunk_size: int = 500,
+        show_chunk_progress: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Draw `num_samples_per_x` posterior sample(s) for each row of `x`,
+        processing `chunk_size` observations at a time so the rejection
+        sampler's internal (max_sampling_batch_size x n_conditions) broadcast
+        stays bounded regardless of how large `x` or `num_samples_per_x` are.
+
+        :returns: Tensor of shape ``(n_observations, num_samples_per_x, theta_dim)``,
+            or ``(n_observations, theta_dim)`` if ``num_samples_per_x == 1``.
+        """
+        x_arr = np.asarray(x)
+        n_obs = x_arr.shape[0]
+        kwargs.setdefault("show_progress_bars", False)
+
+        chunk_iter = range(0, n_obs, chunk_size)
+        if show_chunk_progress:
+            chunk_iter = tqdm(
+                chunk_iter,
+                desc=f"Sampling posterior in chunks of {chunk_size}",
+                total=(n_obs + chunk_size - 1) // chunk_size,
+            )
+
+        chunks = []
+        for start in chunk_iter:
+            end = min(start + chunk_size, n_obs)
+            x_chunk = x_arr[start:end]
+            samples_chunk = self.sample_posterior(
+                num_samples_per_x, x=x_chunk, **kwargs
+            ).cpu()
+            # shape (num_samples_per_x, chunk_len, theta_dim)
+            chunks.append(samples_chunk)
+            if self.device_handler.device == "cuda":
+                torch.cuda.empty_cache()
+
+        # Reassemble the full observation axis (was split across chunks on dim=1)
+        samples = torch.cat(chunks, dim=1)  # (num_samples_per_x, n_obs, theta_dim)
+
+        # (n_obs, num_samples_per_x, theta_dim) is the more natural layout —
+        # matches thetas/xs indexing by observation.
+        samples = samples.permute(1, 0, 2)
+
+        if num_samples_per_x == 1:
+            samples = samples.squeeze(1)  # (n_obs, theta_dim), for LC2ST-style calls
+
+        return samples

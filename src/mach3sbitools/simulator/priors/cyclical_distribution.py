@@ -113,7 +113,7 @@ class CyclicalDistribution(torch.distributions.Distribution):
         in_bounds = pdf > 1e-8
         log_p = torch.full(pdf.shape, -np.inf, dtype=torch.double, device=self.device)
         log_p[in_bounds] = -1 * torch.log(pdf[in_bounds])
-        return log_p
+        return -log_p
 
     def _build_cdf_grid(
         self, n_points: int = 10_000
@@ -193,3 +193,11 @@ class CyclicalDistribution(torch.distributions.Distribution):
             if not sample_shape
             else samples.reshape(*sample_shape, len(self.nominals))
         ).to(self.device)
+
+    def to(self, device: torch.device | str) -> "CyclicalDistribution":
+        """Move cached tensors to *device* in-place."""
+        self.device = torch.device(device)
+        self.nominals = self.nominals.to(device)
+        self.lower_bounds = self.lower_bounds.to(device)
+        self.upper_bounds = self.upper_bounds.to(device)
+        return self

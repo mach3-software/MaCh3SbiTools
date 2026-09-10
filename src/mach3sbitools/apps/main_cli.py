@@ -657,17 +657,6 @@ def importance_sample(
     "The model architecture is read directly from the checkpoint — "
     "no architecture flags are needed.",
 )
-@optgroup.group("Parameters")
-@optgroup.option(
-    "--nuisance_pars",
-    "-p",
-    multiple=True,
-)
-@optgroup.option(
-    "--cyclical_pars",
-    "-cy",
-    multiple=True,
-)
 @optgroup.group("Diagnostic Types")
 @optgroup.option(
     "--make_sbc_rank",

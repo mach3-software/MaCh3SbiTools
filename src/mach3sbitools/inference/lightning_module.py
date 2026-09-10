@@ -7,14 +7,14 @@ import time
 import lightning as L
 import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
+from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.distributed._composable.fsdp import fully_shard
-from torch.distributed.checkpoint.state_dict import (
-    StateDictOptions,
-    get_model_state_dict,
-)
+
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.utils import PosteriorConfig, TrainingConfig
+from mach3sbitools.utils import get_logger, PosteriorConfig, TrainingConfig
+
+logger = get_logger()
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
 
@@ -218,6 +218,8 @@ class SBILightningModule(L.LightningModule):
 
         self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
 
+
+
     # ── Validation ────────────────────────────────────────────────────────────
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
@@ -324,6 +326,10 @@ class SBILightningModule(L.LightningModule):
         checkpoint["model_config"] = self.model_config
         checkpoint["epoch"] = self.current_epoch
 
+        checkpoint["ema_val_loss"] = self.ema_val_loss
+        checkpoint["prev_val_loss"] = self._prev_val_loss
+        checkpoint["prev_ema_loss"] = self._prev_ema_loss
+
         # Lets us load everything from a single checkpoint
         checkpoint["theta_dim"] = self.model.input_shape[0]
         checkpoint["theta_compressor"] = (
@@ -334,3 +340,11 @@ class SBILightningModule(L.LightningModule):
         checkpoint["x_compressor"] = (
             self._x_compressor.state_dict() if self._x_compressor else None
         )
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore EMA/diagnostics state saved by on_save_checkpoint."""
+        if "ema_val_loss" not in checkpoint:
+            logger.warning("Checkpoint predates EMA-state saving; cold-starting EMA.")
+        self.ema_val_loss = checkpoint.get("ema_val_loss", float("inf"))
+        self._prev_val_loss = checkpoint.get("prev_val_loss", float("inf"))
+        self._prev_ema_loss = checkpoint.get("prev_ema_loss", float("inf"))

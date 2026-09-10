@@ -24,6 +24,35 @@ warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 FORCE_DTYPE = None
 
 
+def _truncate_npy(path: Path, new_n_rows: int, chunk_rows: int = 100_000):
+    """
+    Rewrite a memmap-backed .npy file so it only contains its first
+    new_n_rows rows, dropping any trailing unused/uninitialized rows.
+
+    We can't just slice the file in place because the .npy header (which
+    encodes the shape) is padded/aligned to 64 bytes, and that padding can
+    shift width depending on the digit count of the shape - so we rewrite
+    via open_memmap with the correct shape and stream-copy the data across
+    in chunks to avoid loading the whole array into memory.
+    """
+    arr = np.load(path, mmap_mode="r")
+    if new_n_rows == arr.shape[0]:
+        return
+
+    new_shape = (new_n_rows,) + arr.shape[1:]
+    tmp_path = path.with_suffix(".npy.tmp")
+    new_arr = np.lib.format.open_memmap(
+        tmp_path, mode="w+", dtype=arr.dtype, shape=new_shape
+    )
+    for start in range(0, new_n_rows, chunk_rows):
+        end = min(start + chunk_rows, new_n_rows)
+        new_arr[start:end] = arr[start:end]
+    new_arr.flush()
+
+    del arr, new_arr  # release mmaps before replacing the file
+    tmp_path.replace(path)
+
+
 def merge_shards_module(simulation_dir: Path, output_dir: Path):
     """
     Merge a folder of feather shard files into memmap-backed theta.npy / x.npy
@@ -65,7 +94,9 @@ def merge_shards_module(simulation_dir: Path, output_dir: Path):
     del t_test, x_test
 
     # Create the memmap-backed .npy files up front, sized for the full
-    # merged dataset - same role as h5py.File.create_dataset before.
+    # merged dataset (pre-filter) - same role as h5py.File.create_dataset
+    # before. Since rows get dropped by the filter below, we may end up
+    # writing fewer than n_rows rows; the tail is trimmed off at the end.
     theta_out = np.lib.format.open_memmap(
         theta_path, mode="w+", dtype=theta_dtype, shape=(n_rows, t_dim)
     )
@@ -76,10 +107,22 @@ def merge_shards_module(simulation_dir: Path, output_dir: Path):
     desc_str = f"Adding sims to {output_dir} | current file: "
 
     offset = 0
+    total_filtered = 0
+
     for shard in (pbar := tqdm(sims_files, desc=desc_str + str(sims_files[0]))):
         pbar.set_description(desc_str + str(shard))
 
         t, x = from_feather(shard)
+
+        before = len(t)
+
+        # HACK
+        # t_filter = np.where(t[:, -2] > 0)
+
+        # t = t[t_filter]
+        # x = x[t_filter]
+
+        # total_filtered += before - len(t)
 
         theta_out[offset : offset + len(t)] = t
         x_out[offset : offset + len(x)] = x
@@ -87,5 +130,16 @@ def merge_shards_module(simulation_dir: Path, output_dir: Path):
 
     theta_out.flush()
     x_out.flush()
+    del theta_out, x_out  # release mmaps so the files can be truncated/replaced
 
-    get_logger().info("Finished merge")
+    if offset < n_rows:
+        get_logger().info(
+            "Trimming %d unused/uninitialized rows from output arrays",
+            n_rows - offset,
+        )
+        _truncate_npy(theta_path, offset)
+        _truncate_npy(x_path, offset)
+
+    get_logger().info(
+        "Finished merge. Filtered out %d/%d entries", total_filtered, n_rows
+    )

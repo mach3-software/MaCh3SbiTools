@@ -26,6 +26,13 @@ class ProcessedSystematics:
     covariance: np.ndarray
 
     def __getitem__(self, mask):
+        """
+        Select a subset of parameters.
+
+        :param mask: Boolean or index mask over the parameter axis.
+        :returns: A new :class:`ProcessedSystematics` holding only those
+            parameters, with the covariance sliced on both axes.
+        """
         return ProcessedSystematics(
             names=self.names[mask],
             errors=self.errors[mask],
@@ -38,14 +45,18 @@ class ProcessedSystematics:
         )
 
     def __len__(self):
+        """
+        :returns: Number of parameters held.
+        """
         return len(self.names)
 
 
 def process_parameters(parameter_handler) -> ProcessedSystematics:
     """
     Process a list of MaCh3 parameter handler YAML files.
-    :param parameter_handler:
-    :return:
+
+    :param parameter_handler: MaCh3 parameter handler to read from.
+    :returns: The parameter properties, packed into a dataclass.
     """
     n_systs = parameter_handler.get_n_pars()
     idx = range(n_systs)

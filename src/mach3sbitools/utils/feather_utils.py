@@ -27,8 +27,6 @@ def from_feather(file_name: Path) -> SimulatorDataGrouped:
     Load a ``(theta, x)`` pair from a feather file.
 
     :param file_name: Path to the ``.feather`` file.
-    :param nuisance_filter: fnmatch patterns for parameters to exclude from
-        *theta*. ``None`` returns all parameters.
     :returns: Tuple of ``(theta, x)`` as ``float32`` numpy arrays.
     :raises FileNotFoundError: If *file_name* does not exist.
     """
@@ -75,7 +73,12 @@ def to_feather(
 
 
 def peek_num_rows(file_name: Path) -> int:
-    """Read a feather file's row count from its footer, without loading data."""
+    """
+    Read a feather file's row count from its footer, without loading data.
+
+    :param file_name: Path to the ``.feather`` file.
+    :returns: Number of rows in the file.
+    """
     if not isinstance(file_name, Path):
         file_name = Path(file_name)
 
@@ -84,12 +87,17 @@ def peek_num_rows(file_name: Path) -> int:
 
 
 def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
-    """Convert a fixed-width list column into a 2D numpy array (near zero-copy)."""
+    """
+    Convert a fixed-width list column into a 2D numpy array (near zero-copy).
+
+    :param column: Arrow column of equal-length lists.
+    :returns: Array of shape ``(n_rows, n_features)``.
+    """
     arr = column.combine_chunks()
     n_rows = len(arr)
     flat = arr.flatten().to_numpy(zero_copy_only=False)
     n_features = flat.shape[0] // n_rows
-    return flat.reshape(n_rows, n_features)
+    return cast(np.ndarray, flat.reshape(n_rows, n_features))
 
 
 class FeatherFileHandle:
@@ -101,7 +109,12 @@ class FeatherFileHandle:
 
     __slots__ = ("_source", "path", "theta", "x")
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path) -> None:
+        """
+        Memory-map *path* and expose its two columns.
+
+        :param path: Path to an uncompressed ``.feather`` file.
+        """
         self.path = Path(path)
         self._source = memory_map(str(self.path), "r")
         table = ipc.open_file(self._source).read_all()
@@ -110,7 +123,11 @@ class FeatherFileHandle:
 
     @property
     def num_rows(self) -> int:
+        """
+        :returns: Number of rows held in the mapped file.
+        """
         return cast(int, self.theta.shape[0])
 
     def close(self) -> None:
+        """Release the underlying memory map."""
         self._source.close()

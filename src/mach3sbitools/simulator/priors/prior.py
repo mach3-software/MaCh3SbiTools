@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from torch.distributions import Uniform, constraints
 
-from mach3sbitools.utils import TorchDeviceHandler, get_logger
+from mach3sbitools.utils import get_device, get_logger, to_tensor
 
 from ..simulator_injector import SimulatorProtocol
 from .cyclical_distribution import CyclicalDistribution
@@ -41,9 +41,6 @@ class PriorNotFound(Exception):
 
 
 logger = get_logger()
-
-
-from torch.distributions import Uniform, constraints
 
 
 @dataclass(frozen=True)
@@ -64,9 +61,11 @@ class MaskDistributionMap:
         for flat priors) does NOT implement ``to()`` — it's a plain
         Distribution, not an nn.Module — so it must be rebuilt explicitly
         or it silently stays on its original device.
+
+        :param device: Target torch device.
+        :returns: A map whose mask and distribution live on *device*.
         """
         dist = self.distribution
-
 
         if hasattr(dist, "to") and callable(getattr(dist, "to")):
             dist = dist.to(device)
@@ -79,7 +78,7 @@ class MaskDistributionMap:
                 f"Add a .to() method or handle it explicitly here."
             )
 
-        return MaskDistributionMap(mask=self.mask.to(device), distribution=dist)    
+        return MaskDistributionMap(mask=self.mask.to(device), distribution=dist)
 
 
 class Prior(torch.distributions.Distribution):
@@ -110,6 +109,11 @@ class Prior(torch.distributions.Distribution):
         filter, construct a new :class:`Prior`.
     """
 
+    #: Filtered prior data, rebuilt lazily and dropped by :meth:`to`.
+    _prior_data_cache: PriorData | None
+    #: Cached ``(lower, upper)`` support bounds, dropped by :meth:`to`.
+    _effective_bounds: tuple[torch.Tensor, torch.Tensor] | None
+
     def __init__(
         self,
         prior_data: PriorData,
@@ -133,8 +137,9 @@ class Prior(torch.distributions.Distribution):
             ``[lower, upper] + [-upper, -lower]``.  The bounds are read from
             *prior_data* and must satisfy ``0 < lower < upper``.
         """
-        self.device_handler = TorchDeviceHandler()
-        self._prior_data = prior_data
+        self._device = get_device()
+        self._prior_data = prior_data.to(self._device)
+        self._invalidate_cache()
 
         # Apply nuisance filter once — masks are built against the filtered set
         # and cannot be safely remapped if the filter changes afterwards.
@@ -149,18 +154,16 @@ class Prior(torch.distributions.Distribution):
                 any(fnmatch.fnmatch(p, c) for c in cyclical_parameters)
                 for p in self.prior_data.parameter_names
             ]
-            cyclical_mask = self.device_handler.to_tensor(cyclical_mask_)
+            cyclical_mask = to_tensor(cyclical_mask_)
         else:
-            cyclical_mask = torch.zeros(
-                n_params, dtype=torch.bool, device=self.device_handler.device
-            )
+            cyclical_mask = torch.zeros(n_params, dtype=torch.bool, device=self._device)
 
         if any(cyclical_mask):
             # Mutate _prior_data directly, not a temporary slice
             full_cyclical_mask = torch.zeros(
                 len(self._prior_data.parameter_names),
                 dtype=torch.bool,
-                device=self.device_handler.device,
+                device=self._device,
             )
             full_cyclical_mask[self.nuisance_filter] = cyclical_mask
             self._prior_data.lower_bounds[full_cyclical_mask] = -2 * torch.pi
@@ -175,13 +178,11 @@ class Prior(torch.distributions.Distribution):
                 any(fnmatch.fnmatch(p, f) for f in flipped_parameters)
                 for p in self.prior_data.parameter_names
             ]
-            flipped_mask = self.device_handler.to_tensor(flipped_mask_).bool()
+            flipped_mask = to_tensor(flipped_mask_).bool()
             # Flipped params must not also be cyclical
             flipped_mask = flipped_mask & ~cyclical_mask
         else:
-            flipped_mask = torch.zeros(
-                n_params, dtype=torch.bool, device=self.device_handler.device
-            )
+            flipped_mask = torch.zeros(n_params, dtype=torch.bool, device=self._device)
 
         # Store for use in check_bounds — flipped params are valid in EITHER
         # region so the standard lower/upper bounds check would incorrectly
@@ -195,7 +196,7 @@ class Prior(torch.distributions.Distribution):
         # Guard against None so the tensor conversion doesn't crash.
         flat_msk = flat_msk if flat_msk is not None else [False] * n_params
 
-        flat_msk_tensor = self.device_handler.to_tensor(flat_msk).bool()
+        flat_msk_tensor = to_tensor(flat_msk).bool()
         flat_msk_filtered = flat_msk_tensor[self.nuisance_filter]
 
         flat_mask = flat_msk_filtered & ~cyclical_mask & ~flipped_mask
@@ -226,9 +227,7 @@ class Prior(torch.distributions.Distribution):
         """
         if nuisance_patterns is None:
             n_pars = len(self._prior_data.parameter_names)
-            return torch.ones(
-                n_pars, dtype=torch.bool, device=self.device_handler.device
-            )
+            return torch.ones(n_pars, dtype=torch.bool, device=self._device)
 
         keep = [
             not any(
@@ -238,11 +237,17 @@ class Prior(torch.distributions.Distribution):
             for p in self._prior_data.parameter_names
         ]
 
-        return self.device_handler.to_tensor(keep)
+        return to_tensor(keep)
 
     # ── Private distribution builders ──────────────────────────────────────────
 
     def _get_cyclical_map(self, cyclical_mask: torch.Tensor) -> MaskDistributionMap:
+        """
+        Build the cyclical sub-prior.
+
+        :param cyclical_mask: Mask selecting cyclical parameters.
+        :returns: Mask/distribution pair for those parameters.
+        """
         cyclical_data = self.prior_data[cyclical_mask]
         cyclical_dist = CyclicalDistribution(cyclical_data.nominals)
         return MaskDistributionMap(cyclical_mask, cyclical_dist)
@@ -271,7 +276,7 @@ class Prior(torch.distributions.Distribution):
         for idx in flipped_indices:
             # Build a single-parameter mask
             single_mask = torch.zeros(
-                len(flipped_mask), dtype=torch.bool, device=self.device_handler.device
+                len(flipped_mask), dtype=torch.bool, device=self._device
             )
             single_mask[idx] = True
 
@@ -298,11 +303,23 @@ class Prior(torch.distributions.Distribution):
         return maps
 
     def _get_flat_map(self, flat_mask: torch.Tensor) -> MaskDistributionMap:
+        """
+        Build the uniform sub-prior for parameters flagged flat.
+
+        :param flat_mask: Mask selecting flat parameters.
+        :returns: Mask/distribution pair for those parameters.
+        """
         flat_data = self.prior_data[flat_mask]
         flat_dist = Uniform(flat_data.lower_bounds, flat_data.upper_bounds)
         return MaskDistributionMap(flat_mask, flat_dist)
 
     def _get_gaussian_map(self, gaussian_mask: torch.Tensor) -> MaskDistributionMap:
+        """
+        Build the truncated-Gaussian sub-prior for the remaining parameters.
+
+        :param gaussian_mask: Mask selecting Gaussian-constrained parameters.
+        :returns: Mask/distribution pair for those parameters.
+        """
         gaussian_data = self.prior_data[gaussian_mask]
         dist = TruncatedGaussianDistribution(
             mean=gaussian_data.nominals,
@@ -313,33 +330,81 @@ class Prior(torch.distributions.Distribution):
         return MaskDistributionMap(gaussian_mask, dist)
 
     # ── Properties ─────────────────────────────────────────────────────────────
+    def _compute_effective_bounds(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Build the bounds pair used for support checks.
+
+        A flipped parameter is valid on ``[-upper, -lower]`` as well as
+        ``[lower, upper]``, so its effective lower bound is ``-upper``.
+
+        :returns: Tuple of ``(lower, upper)`` bounds, shape ``(n_params,)``.
+        """
+        lower = self.prior_data.lower_bounds.clone()
+        if self._flipped_mask.any():
+            lower[self._flipped_mask] = -self.prior_data.upper_bounds[
+                self._flipped_mask
+            ]
+        return lower, self.prior_data.upper_bounds
+
     @property
     def effective_lower_bounds(self) -> torch.Tensor:
-        """Lower bounds accounting for flipped parameters (which are valid in [-upper, -lower])."""
-        lb = self.prior_data.lower_bounds.clone()
-        if self._flipped_mask.any():
-            # Flipped params are valid from -upper to +upper (excluding the gap)
-            lb[self._flipped_mask] = -self.prior_data.upper_bounds[self._flipped_mask]
-        return lb
+        """
+        :returns: Lower bounds of shape ``(n_params,)``, widened for flipped
+            parameters.
+        """
+        if self._effective_bounds is None:
+            self._effective_bounds = self._compute_effective_bounds()
+        return self._effective_bounds[0]
 
     @property
     def effective_upper_bounds(self) -> torch.Tensor:
-        """Upper bounds accounting for flipped parameters."""
-        return self.prior_data.upper_bounds
+        """
+        :returns: Upper bounds of shape ``(n_params,)``.
+        """
+        if self._effective_bounds is None:
+            self._effective_bounds = self._compute_effective_bounds()
+        return self._effective_bounds[1]
+
+    @property
+    def device(self) -> torch.device:
+        """
+        :returns: The device every tensor in this prior lives on.
+        """
+        return self._device
 
     @property
     def prior_data(self) -> PriorData:
-        """Active :class:`PriorData` after applying the nuisance filter."""
-        return self._prior_data[self.nuisance_filter]
+        """
+        Active :class:`PriorData` after applying the nuisance filter.
+
+        Filtering rebuilds four tensors including an O(n²) slice of the
+        covariance matrix, and this is read on every bounds check, so the
+        result is cached. The nuisance filter is fixed at construction, so
+        only :meth:`to` can invalidate it.
+
+        :returns: The filtered prior data.
+        """
+        if self._prior_data_cache is None:
+            self._prior_data_cache = self._prior_data[self.nuisance_filter]
+        return self._prior_data_cache
+
+    def _invalidate_cache(self) -> None:
+        """Drop the derived tensors cached off :attr:`_prior_data`."""
+        self._prior_data_cache = None
+        self._effective_bounds = None
 
     @property
     def mean(self) -> torch.Tensor:
-        """Prior mean — the nominal parameter values."""
-        return self.device_handler.to_tensor(self.prior_data.nominals)
+        """
+        :returns: Prior mean — the nominal parameter values.
+        """
+        return to_tensor(self.prior_data.nominals)
 
     @property
     def n_params(self) -> int:
-        """Number of active (non-nuisance) parameters."""
+        """
+        :returns: Number of active (non-nuisance) parameters.
+        """
         return len(self.prior_data.nominals)
 
     @property
@@ -347,17 +412,23 @@ class Prior(torch.distributions.Distribution):
         """
         Per-parameter prior variance, assembled from all sub-distributions.
 
+        :returns: Variance tensor of shape ``(n_params,)``.
+
         The mask for each sub-distribution is sized against the filtered
         parameter set (same as the tensor being filled), so shapes are always
         consistent.
         """
-        variance = torch.zeros(self.n_params, device=self.device_handler.device)
+        variance = torch.zeros(self.n_params, device=self._device)
         for mask_map in self._priors:
             variance[mask_map.mask] = mask_map.distribution.variance
         return variance
 
     @property
-    def support(self):
+    def support(self) -> constraints.Constraint:
+        """
+        :returns: The interval constraint sbi uses to reject out-of-bounds
+            proposals, built from the effective bounds.
+        """
         return constraints.independent(
             constraints.interval(
                 self.effective_lower_bounds,
@@ -385,9 +456,8 @@ class Prior(torch.distributions.Distribution):
         samples = torch.empty(
             (*sample_shape, self.n_params),
             dtype=torch.double,
-            device=self.device_handler.device,
+            device=self._device,
         )
-
 
         for mask_map in self._priors:
             samples[..., mask_map.mask] = mask_map.distribution.sample(sample_shape).to(
@@ -412,8 +482,17 @@ class Prior(torch.distributions.Distribution):
         return samples
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluate the joint prior log-density.
+
+        Each sub-distribution contributes the parameters its mask selects;
+        the contributions are summed as the blocks are independent.
+
+        :param value: Parameters of shape ``(..., n_params)``.
+        :returns: Log-density of shape ``(...,)``.
+        """
         log_prob = torch.zeros(
-            value.shape[:-1], dtype=torch.double, device=self.device_handler.device
+            value.shape[:-1], dtype=torch.double, device=self._device
         )
         for mask_map in self._priors:
             lp = mask_map.distribution.log_prob(value[..., mask_map.mask])
@@ -426,6 +505,16 @@ class Prior(torch.distributions.Distribution):
         return log_prob
 
     def check_bounds(self, params: torch.Tensor) -> torch.Tensor:
+        """
+        Test whether each row lies inside the prior support.
+
+        Flipped parameters are handled specially: the forbidden gap
+        ``(-lower, lower)`` around zero is excluded as well as the outer
+        bounds.
+
+        :param params: Parameters of shape ``(..., n_params)``.
+        :returns: Boolean mask of shape ``(...,)``.
+        """
         lb = self.effective_lower_bounds.to(params.device)
         ub = self.effective_upper_bounds.to(params.device)
 
@@ -438,7 +527,9 @@ class Prior(torch.distributions.Distribution):
             in_gap = params.abs() < flipped_lb
             in_bounds[..., self._flipped_mask] &= ~in_gap[..., self._flipped_mask]
 
-        return self.device_handler.to_tensor(in_bounds.all(dim=-1))
+        # Stay on the caller's device: this runs inside the rejection-sampling
+        # loop, where a hop to another device would cost a sync per batch.
+        return in_bounds.all(dim=-1)
 
     # ── Persistence ────────────────────────────────────────────────────────────
     def save(self, output_path: Path) -> None:
@@ -459,15 +550,51 @@ class Prior(torch.distributions.Distribution):
         :param device: Target PyTorch device.
         :returns: ``self``, for chaining.
         """
-        self.device_handler = TorchDeviceHandler()        
-        self._prior_data = self._prior_data.to(device)
+        self._device = torch.device(device)
+        self._prior_data = self._prior_data.to(self._device)
         for i, mask_map in enumerate(self._priors):
-            self._priors[i] = mask_map.to(device)
-        self.nuisance_filter = self.nuisance_filter.to(device)
-        self._flipped_mask = self._flipped_mask.to(device)
+            self._priors[i] = mask_map.to(self._device)
+        self.nuisance_filter = self.nuisance_filter.to(self._device)
+        self._flipped_mask = self._flipped_mask.to(self._device)
+        self.cyclical_mask = self.cyclical_mask.to(self._device)
+        self._invalidate_cache()
 
         return self
-    
+
+    # ── Pickling ───────────────────────────────────────────────────────────────
+    def __getstate__(self) -> dict:
+        """
+        Drop derived state so it cannot be restored stale.
+
+        The cached tensors and the recorded device describe the machine that
+        pickled the prior, not the one that will load it.
+
+        :returns: The picklable instance dictionary.
+        """
+        state = self.__dict__.copy()
+        for derived in ("_prior_data_cache", "_effective_bounds", "_device"):
+            state.pop(derived, None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """
+        Restore a pickled prior onto *this* machine's device.
+
+        A prior pickled on a GPU node and loaded on a CPU one would otherwise
+        keep the device it was saved with. Device detection is redone here and
+        every tensor moved to match, so the prior is always self-consistent
+        after a load.
+
+        :param state: The unpickled instance dictionary.
+        """
+        # Legacy pickles carry a TorchDeviceHandler instance; it is replaced
+        # by the detection below.
+        state.pop("device_handler", None)
+        self.__dict__.update(state)
+        self._invalidate_cache()
+        self.to(get_device())
+
+
 # ── Module-level helpers ───────────────────────────────────────────────────────
 def _check_boundary(
     nominal: torch.Tensor,
@@ -544,18 +671,17 @@ def create_prior(
     :returns: Configured :class:`Prior` ready for use with ``sbi``.
     """
     logger.info("Creating Prior")
-    dh = TorchDeviceHandler()
 
-    nominals = dh.to_tensor(simulator_instance.get_parameter_nominals())
-    errors = dh.to_tensor(simulator_instance.get_parameter_errors())
+    nominals = to_tensor(simulator_instance.get_parameter_nominals())
+    errors = to_tensor(simulator_instance.get_parameter_errors())
     lower_arr, upper_arr = simulator_instance.get_parameter_bounds()
-    lower = dh.to_tensor(lower_arr)
-    upper = dh.to_tensor(upper_arr)
+    lower = to_tensor(lower_arr)
+    upper = to_tensor(upper_arr)
     names = np.array(simulator_instance.get_parameter_names(), dtype=str)
 
     _check_boundary(nominals, errors, lower, upper, names)
 
-    covariance = dh.to_tensor(simulator_instance.get_covariance_matrix())
+    covariance = to_tensor(simulator_instance.get_covariance_matrix())
     flat_pars = [simulator_instance.get_is_flat(i) for i in range(len(names))]
 
     data = PriorData(
@@ -578,7 +704,7 @@ def create_prior(
     return prior
 
 
-def load_prior(prior_path: Path, device=torch.device("cpu")) -> Prior:
+def load_prior(prior_path: Path, device: torch.device | str | None = None) -> Prior:
     """
     Load a pickled :class:`Prior` from disk.
 
@@ -587,7 +713,8 @@ def load_prior(prior_path: Path, device=torch.device("cpu")) -> Prior:
         prior = load_prior(Path("prior.pkl"))
 
     :param prior_path: Path to a ``.pkl`` file produced by :meth:`Prior.save`.
-    :param device: Device to move the prior to after loading. Defaults to CPU.
+    :param device: Device to move the prior to after loading. Defaults to
+        whatever :func:`~mach3sbitools.utils.get_device` selects.
     :returns: The loaded :class:`Prior`.
     :raises PriorNotFound: If *prior_path* does not exist or does not contain
         a valid :class:`Prior`.
@@ -595,15 +722,15 @@ def load_prior(prior_path: Path, device=torch.device("cpu")) -> Prior:
     if not isinstance(prior_path, Path):
         prior_path = Path(prior_path)
 
-    if not prior_path.is_file() or not prior_path.exists():
-        raise PriorNotFound("Could not find prior %s", prior_path)
+    if not prior_path.is_file():
+        raise PriorNotFound(f"Could not find prior {prior_path}")
 
     with prior_path.open("rb") as f:
         prior = pickle.load(f)
 
     if not isinstance(prior, Prior):
         raise PriorNotFound(
-            "No valid prior in %s. Instead found %s", prior_path, type(prior)
+            f"No valid prior in {prior_path}. Instead found {type(prior)}"
         )
 
-    return prior.to(device)
+    return prior.to(device if device is not None else get_device())

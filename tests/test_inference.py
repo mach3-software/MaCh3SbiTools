@@ -15,11 +15,10 @@ import torch
 from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
 from scipy import stats
-from torch.utils.data import TensorDataset
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import load_prior
-from mach3sbitools.utils import TorchDeviceHandler
+from mach3sbitools.utils import to_tensor
 
 N_SAMPLES = 10_000
 
@@ -32,8 +31,7 @@ N_SAMPLES = 10_000
 @pytest.fixture(scope="session")
 def nominal_observation(simulator_injector):
     rng = np.random.default_rng(42)
-    dh = TorchDeviceHandler()
-    return dh.to_tensor(
+    return to_tensor(
         rng.poisson(lam=1, size=len(simulator_injector.get_data_bins()))
         .astype(np.float32)
         .tolist()
@@ -41,13 +39,8 @@ def nominal_observation(simulator_injector):
 
 
 @pytest.fixture(scope="session")
-def trained_handler(prior_save, dummy_data_dir, posterior_config, training_config):
-    handler = InferenceHandler(prior_save)
-    handler.set_dataset(dummy_data_dir)
-    handler.load_training_data()
-    handler.create_posterior(posterior_config)
-    handler.train_posterior(training_config)
-    return handler
+def trained_handler(train_handler, training_config):
+    return train_handler(training_config)
 
 
 @pytest.fixture(scope="session")
@@ -62,21 +55,27 @@ def samples(trained_handler, nominal_observation):
 
 @pytest.mark.slow
 class TestInferenceHandlerErrorPaths:
-    def test_load_training_data_requires_dataset(self, prior_save):
-        with pytest.raises(ValueError):
-            InferenceHandler(prior_save).load_training_data()
+    def test_probe_batch_requires_dataset(self, prior_save):
+        with pytest.raises(ValueError, match="set_dataset"):
+            InferenceHandler(prior_save)._probe_batch()
 
-    def test_train_posterior_requires_tensor_dataset(
+    def test_set_dataset_missing_files(self, prior_save, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            InferenceHandler(prior_save).set_dataset(tmp_path)
+
+    def test_train_posterior_requires_dataset(
         self, prior_save, posterior_config, training_config
     ):
         handler = InferenceHandler(prior_save)
         handler.create_posterior(posterior_config)
-        with pytest.raises(ValueError, match="load_training_data"):
+        with pytest.raises(ValueError, match="set_dataset"):
             handler.train_posterior(training_config)
 
-    def test_train_posterior_requires_inference(self, prior_save, training_config):
+    def test_train_posterior_requires_inference(
+        self, prior_save, merged_data_dir, training_config
+    ):
         handler = InferenceHandler(prior_save)
-        handler._tensor_dataset = TensorDataset(torch.zeros(10, 4), torch.zeros(10, 6))
+        handler.set_dataset(merged_data_dir)
         with pytest.raises(ValueError, match="create_posterior"):
             handler.train_posterior(training_config)
 
@@ -112,13 +111,14 @@ class TestInferenceHandlerErrorPaths:
 
 @pytest.mark.slow
 class TestInferenceHandlerHappyPath:
-    def test_full_lifecycle_setup(self, prior_save, dummy_data_dir, posterior_config):
+    def test_full_lifecycle_setup(
+        self, prior_save, merged_data_dir, posterior_config, test_consts
+    ):
         """Each lifecycle step should leave the handler in the expected state."""
         handler = InferenceHandler(prior_save)
-        handler.set_dataset(dummy_data_dir)
+        handler.set_dataset(merged_data_dir)
         assert handler.dataset is not None
-        handler.load_training_data()
-        assert handler._tensor_dataset is not None
+        assert handler.dataset.theta_dim == test_consts.theta_dim
         handler.create_posterior(posterior_config)
         assert handler.inference is not None
 
@@ -171,12 +171,12 @@ class TestInferenceHandlerCheckpoints:
         ckpt_path = tmp_path / "de.pt"
         torch.save(trained_handler._density_estimator.state_dict(), ckpt_path)
 
-        theta_dim = trained_handler._tensor_dataset.tensors[0].shape[1]
-        x_dim = trained_handler._tensor_dataset.tensors[1].shape[1]
+        theta_dim = trained_handler.dataset.theta_dim
+        x_dim = trained_handler.dataset.x_dim
 
         loaded = InferenceHandler(prior_save)
         loaded.create_posterior(posterior_config)
-        device = loaded.device_handler.device
+        device = loaded.device
         de = loaded.inference._build_neural_net(
             torch.zeros(2, theta_dim, device=device),
             torch.zeros(2, x_dim, device=device),
@@ -187,11 +187,18 @@ class TestInferenceHandlerCheckpoints:
         de.to(device).eval()
         loaded._density_estimator = de
 
+        n_compare = 2000
+        torch.manual_seed(0)
         original = (
-            trained_handler.sample_posterior(500, nominal_observation).cpu().numpy()
+            trained_handler.sample_posterior(n_compare, nominal_observation)
+            .cpu()
+            .numpy()
         )
-        reloaded = loaded.sample_posterior(500, nominal_observation).cpu().numpy()
+        torch.manual_seed(0)
+        reloaded = loaded.sample_posterior(n_compare, nominal_observation).cpu().numpy()
 
+        # Two-sample KS 99.9% critical value for n = m = 2000 is ~0.062;
+        # 0.1 leaves headroom so the test fails on real drift, not noise.
         for i in range(original.shape[1]):
             ks_stat, _ = stats.ks_2samp(original[:, i], reloaded[:, i], method="asymp")
             assert ks_stat < 0.1, f"Parameter {i}: KS={ks_stat:.3f}"
@@ -207,14 +214,14 @@ class TestInferenceHandlerCheckpoints:
             dropout_probability=posterior_config.dropout_probability,
             num_blocks=posterior_config.num_blocks,
             num_bins=posterior_config.num_bins,
-            device=prior.device_handler.device,
+            device=prior.device,
             z_score_x="independent",
             z_score_theta="independent",
         )
         npe = NPE(
             prior=prior,
             density_estimator=neural_net,
-            device=prior.device_handler.device,
+            device=prior.device,
         )
         theta_dim = len(prior.prior_data.parameter_names)
         x_dim = 12

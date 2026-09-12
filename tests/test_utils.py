@@ -12,31 +12,84 @@ import pandas as pd
 import pytest
 import torch
 
-from mach3sbitools.utils.device_handler import TensorConversionError, TorchDeviceHandler
-from mach3sbitools.utils.file_utils import from_feather, to_feather
+from mach3sbitools.utils import get_device, reset_device_cache, to_tensor
+from mach3sbitools.utils.device_handler import DEVICE_ENV_VAR, TensorConversionError
+from mach3sbitools.utils.feather_utils import from_feather, peek_num_rows, to_feather
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TorchDeviceHandler
+# Device selection
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestTorchDeviceHandler:
-    def test_device_is_valid(self):
-        assert TorchDeviceHandler().device in ("cpu", "cuda")
+@pytest.fixture(autouse=True)
+def _clean_device_cache():
+    """Keep the cached device from leaking between tests."""
+    reset_device_cache()
+    yield
+    reset_device_cache()
 
-    def test_to_tensor_from_ndarray(self):
-        t = TorchDeviceHandler().to_tensor(np.array([1.0, 2.0], dtype=np.float32))
+
+class TestGetDevice:
+    def test_returns_a_torch_device(self):
+        """A torch.device, not a string — so `tensor.device == get_device()` works."""
+        device = get_device()
+        assert isinstance(device, torch.device)
+        assert device.type in ("cpu", "cuda")
+
+    def test_compares_equal_to_a_tensor_device(self):
+        assert torch.zeros(1, device=get_device()).device == get_device()
+
+    def test_is_cached(self):
+        assert get_device() is get_device()
+
+    def test_environment_override_is_respected(self, monkeypatch):
+        monkeypatch.setenv(DEVICE_ENV_VAR, "cpu")
+        reset_device_cache()
+        assert get_device() == torch.device("cpu")
+
+    def test_reset_picks_up_a_changed_environment(self, monkeypatch):
+        monkeypatch.setenv(DEVICE_ENV_VAR, "cpu")
+        reset_device_cache()
+        assert get_device().type == "cpu"
+        monkeypatch.delenv(DEVICE_ENV_VAR)
+        reset_device_cache()
+        assert get_device().type in ("cpu", "cuda")
+
+    def test_mps_is_not_selected_automatically(self, monkeypatch):
+        """MPS has no float64, and the priors are evaluated in double."""
+        monkeypatch.delenv(DEVICE_ENV_VAR, raising=False)
+        reset_device_cache()
+        assert get_device().type != "mps"
+
+
+class TestToTensor:
+    def test_from_ndarray(self):
+        t = to_tensor(np.array([1.0, 2.0], dtype=np.float32))
         assert isinstance(t, torch.Tensor)
         assert t.shape == (2,)
 
-    def test_to_tensor_from_dataframe(self):
+    def test_from_dataframe(self):
         df = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
-        t = TorchDeviceHandler().to_tensor(df)
-        assert t.shape == (2, 2)
+        assert to_tensor(df).shape == (2, 2)
 
-    def test_to_tensor_raises_on_unconvertible(self):
+    def test_from_list(self):
+        assert to_tensor([1.0, 2.0, 3.0]).shape == (3,)
+
+    def test_from_tensor_is_detached_copy(self):
+        source = torch.ones(3, requires_grad=True)
+        out = to_tensor(source)
+        assert not out.requires_grad
+        assert out.data_ptr() != source.data_ptr()
+
+    def test_lands_on_the_default_device(self):
+        assert to_tensor([1.0]).device == get_device()
+
+    def test_explicit_device_overrides_the_default(self):
+        assert to_tensor([1.0], device="cpu").device == torch.device("cpu")
+
+    def test_raises_on_unconvertible(self):
         with pytest.raises(TensorConversionError):
-            TorchDeviceHandler().to_tensor(object())
+            to_tensor(object())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,15 +112,15 @@ class TestFeatherIO:
         np.testing.assert_allclose(t_out, theta, rtol=1e-5)
         np.testing.assert_allclose(x_out, x, rtol=1e-5)
 
-    def test_nuisance_filter_applied_on_read(self, tmp_path):
-        theta = np.ones((10, 3), dtype=np.float32)
-        x = np.ones((10, 5), dtype=np.float32)
-        path = tmp_path / "nuisance.feather"
-        to_feather(path, theta, x)
-        nuis_fil = np.ones(3, dtype=bool)
-        nuis_fil[-1] = False
-        t, _ = from_feather(path, nuisance_filter=nuis_fil)
-        assert t.shape == (10, 2)
+    def test_round_trip_preserves_shape(self, feather_file):
+        path, theta, x = feather_file
+        t_out, x_out = from_feather(path)
+        assert t_out.shape == theta.shape
+        assert x_out.shape == x.shape
+
+    def test_peek_num_rows_matches_contents(self, feather_file):
+        path, theta, _ = feather_file
+        assert peek_num_rows(path) == theta.shape[0]
 
     def test_raises_on_wrong_suffix(self, tmp_path):
         with pytest.raises(ValueError, match="feather"):

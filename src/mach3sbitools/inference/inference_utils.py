@@ -1,14 +1,20 @@
 from typing import TypedDict
 
 import torch
-from lightning.pytorch.strategies import ModelParallelStrategy
+from lightning.pytorch.strategies import (
+    DDPStrategy,
+    ModelParallelStrategy,
+    Strategy,
+)
 
-from mach3sbitools.utils import PosteriorConfig, get_logger
+from mach3sbitools.utils import PosteriorConfig, get_device, get_logger
 
 logger = get_logger()
 
 
 class ModelState(TypedDict):
+    """Schema of the checkpoint dict written by ``SBILightningModule``."""
+
     model_state: dict
     model_config: PosteriorConfig
     epoch: int
@@ -20,18 +26,53 @@ class ModelState(TypedDict):
 
 def select_accelerator_and_strategy(
     use_model_parallel: bool = False,
-) -> tuple[str, str | ModelParallelStrategy]:
-    """Generates the model strategy + accelerator"""
-    if torch.cuda.is_available():
-        return "gpu", ModelParallelStrategy() if use_model_parallel else "ddp"
-    if torch.backends.mps.is_available():
-        return "mps", "auto"
-    return "cpu", "auto"
+) -> tuple[str, str | Strategy]:
+    """
+    Pick the Lightning accelerator and distribution strategy for this host.
+
+    The device comes from :func:`~mach3sbitools.utils.get_device`, so the
+    trainer cannot disagree with the rest of the package about where tensors
+    live.
+
+    Density estimators here are small, so distribution is only worth its
+    communication cost when there is genuinely more than one GPU: a single
+    GPU gets ``"auto"`` (no process group at all) rather than DDP-of-one.
+
+    :param use_model_parallel: Shard the model across GPUs with FSDP2 rather
+        than replicating it with DDP. Ignored without multiple CUDA devices.
+    :returns: Tuple of ``(accelerator, strategy)`` for ``lightning.Trainer``.
+    """
+    device = get_device()
+
+    if device.type != "cuda":
+        return device.type, "auto"
+
+    n_devices = torch.cuda.device_count()
+    if n_devices <= 1:
+        return "gpu", "auto"
+
+    if use_model_parallel:
+        return "gpu", ModelParallelStrategy()
+
+    return "gpu", DDPStrategy(
+        # The flow uses every parameter on every step, so DDP does not need to
+        # trace the graph looking for unused ones.
+        find_unused_parameters=False,
+        # Let gradients alias the reduction buckets instead of being copied in.
+        gradient_as_bucket_view=True,
+    )
 
 
 def select_model_kwargs(config: PosteriorConfig) -> dict:
     """
-    Internal method, bit hacky, gets model from kwargs
+    Filter *config* down to the kwargs the chosen flow family accepts.
+
+    Zuko-backed flows reject MAF/MLP concepts such as ``num_blocks``, so
+    passing the full config surface would raise a ``TypeError`` inside sbi.
+    Unknown model names pass everything through and let sbi complain.
+
+    :param config: Requested architecture settings.
+    :returns: The subset of kwargs ``posterior_nn`` will accept.
     """
 
     model_factory: dict[str, set[str]] = {

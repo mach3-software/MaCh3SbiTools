@@ -33,7 +33,7 @@ from tqdm.auto import tqdm
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import Simulator
-from mach3sbitools.utils import TorchDeviceHandler, get_logger
+from mach3sbitools.utils import get_logger, to_tensor
 
 logger = get_logger()
 
@@ -73,11 +73,15 @@ class SBCDiagnostic:
         inference_handler: InferenceHandler,
         plot_dir: Path,
     ) -> None:
+        """
+        :param simulator: Simulator used to generate prior predictive samples.
+        :param inference_handler: Handler holding the trained posterior.
+        :param plot_dir: Directory for output PDFs, created if absent.
+        """
         self.plot_dir = plot_dir
         self.plot_dir.mkdir(exist_ok=True, parents=True)
 
         self.simulator = simulator
-        self._device_handler = TorchDeviceHandler()
 
         self.inference_handler = inference_handler
         inference_handler.build_posterior()
@@ -110,9 +114,7 @@ class SBCDiagnostic:
             ],
             dtype=np.float32,
         )
-        self.prior_predictives = self._device_handler.to_tensor(
-            prior_predictives_np
-        ).to(torch.float32)
+        self.prior_predictives = to_tensor(prior_predictives_np).to(torch.float32)
 
     def _check_prior_sampled(self) -> None:
         """

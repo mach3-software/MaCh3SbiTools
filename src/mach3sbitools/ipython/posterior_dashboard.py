@@ -13,7 +13,6 @@ from matplotlib import pyplot as plt
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import Simulator
-from mach3sbitools.utils import TorchDeviceHandler
 
 from .parameter_context import apply_sliders_to_noms, build_parameter_context
 from .widget_factories import make_bins_slider, make_param_sliders, make_samples_slider
@@ -24,7 +23,6 @@ def build_posterior_view(
     simulator: Simulator,
     inference_handler: InferenceHandler,
     levels_dict: dict[str, float],
-    device_handler: TorchDeviceHandler | None = None,
     base_noms: torch.Tensor | None = None,
 ) -> dict:
     """
@@ -45,8 +43,6 @@ def build_posterior_view(
     :param levels_dict: Mapping of contour label to confidence level, e.g.
         ``{"1-Sigma Contour": 0.393, "2-Sigma Contour": 0.865}``. Scales to
         any number of levels.
-    :param device_handler: Device handler for tensor conversion. Defaults to
-        a fresh :class:`~mach3sbitools.utils.TorchDeviceHandler`.
     :param base_noms: Full-length nominal parameter vector passed to
         ``simulator.simulator_wrapper.simulate``. Slider values overwrite
         the entries selected by ``simulator.prior.nuisance_filter``;
@@ -58,9 +54,8 @@ def build_posterior_view(
         ``run``), in case you want to inspect or drive them from the
         notebook.
     """
-    device_handler = device_handler or TorchDeviceHandler()
     wrapper = simulator.simulator_wrapper
-    ctx = build_parameter_context(simulator, device_handler, base_noms=base_noms)
+    ctx = build_parameter_context(simulator, base_noms=base_noms)
     parameter_names = ctx.parameter_names
 
     sliders = make_param_sliders(
@@ -72,6 +67,11 @@ def build_posterior_view(
     results_cache: dict = {}
 
     def _draw_corner(n_bins: int) -> None:
+        """
+        Render the corner plot from the cached samples.
+
+        :param n_bins: Histogram bins per panel.
+        """
         plot_samples = results_cache["plot_samples"]
         noms = results_cache["noms"]
 
@@ -133,13 +133,23 @@ def build_posterior_view(
             plt.close(fig)
 
     def redraw(_=None) -> None:
+        """
+        Re-render the cached samples after a display-only control changes.
+
+        :param _: Widget change event, unused.
+        """
         if "plot_samples" not in results_cache:
             return
         _draw_corner(bins_slider.value)
 
     def run(_=None) -> None:
+        """
+        Re-simulate, re-sample the posterior, and redraw.
+
+        :param _: Widget change event, unused.
+        """
         slider_values = [sliders[name].value for name in parameter_names]
-        noms = apply_sliders_to_noms(ctx, slider_values, device_handler)
+        noms = apply_sliders_to_noms(ctx, slider_values)
         obs_new = wrapper.simulate(noms.tolist())
         current_n_samples = samples_slider.value
 

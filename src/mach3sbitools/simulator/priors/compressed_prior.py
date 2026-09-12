@@ -46,7 +46,11 @@ class CompressedPriorWrapper(Distribution):
         prior: Prior,
         theta_compressor: CompressorBase,
     ) -> None:
-
+        """
+        :param prior: The prior in the original parameter space.
+        :param theta_compressor: Fitted compressor mapping between the
+            original and compressed parameter spaces.
+        """
         self._prior = prior
         self._compressor = theta_compressor
 
@@ -62,7 +66,10 @@ class CompressedPriorWrapper(Distribution):
     # ------------------------------------------------------------------
     def log_prob(self, theta_compressed: torch.Tensor) -> torch.Tensor:
         """
-        Decompress → evaluate original prior log-prob.
+        Decompress *theta*, then evaluate the original prior's log-density.
+
+        :param theta_compressed: Parameters in compressed space.
+        :returns: Log-density under the original prior.
         """
         # 1. Track the incoming device
         device = theta_compressed.device
@@ -83,15 +90,20 @@ class CompressedPriorWrapper(Distribution):
         """
         Sample from the original prior, then compress.
 
-        Used by sbi when it needs prior proposals (e.g. for leakage
-        correction).
+        Used by sbi when it needs prior proposals, e.g. for leakage
+        correction.
+
+        :param sample_shape: Batch shape to draw.
+        :returns: Samples in compressed space.
         """
         theta_orig = self._prior.sample(torch.Size(sample_shape))
         return self._compressor.transform(theta_orig.to(torch.float32))
 
     @property
     def mean(self) -> torch.Tensor:
-        """Compressed mean (compressed nominal values)."""
+        """
+        :returns: The original prior's mean, mapped into compressed space.
+        """
         return self._compressor.transform(
             self._prior.mean.unsqueeze(0).to(torch.float32)
         ).squeeze(0)
@@ -103,8 +115,8 @@ class CompressedPriorWrapper(Distribution):
     @property
     def support(self) -> constraints.Constraint:
         """
-        A constraint that decompresses ``theta`` before delegating to the
-        original prior's support check.
+        :returns: A constraint that decompresses ``theta`` before delegating
+            to the original prior's support check.
         """
         compressor = self._compressor
         original_prior = self._prior
@@ -114,7 +126,10 @@ class CompressedPriorWrapper(Distribution):
             event_dim = 1
 
             def check(self_, value: torch.Tensor) -> torch.Tensor:
-                # value : (..., n_components)
+                """
+                :param value: Parameters of shape ``(..., n_components)``.
+                :returns: Boolean in-support mask.
+                """
                 orig = compressor.inverse_transform(value.to(torch.float32))
                 # prior.check_bounds expects (n_samples, n_params)
                 if orig.dim() == 1:

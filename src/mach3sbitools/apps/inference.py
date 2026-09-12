@@ -18,7 +18,7 @@ def inference(
     observed_data_file: Path,
     nuisance_pars: list[str],
 ) -> None:
-    """Sample the posterior distribution conditioned on observed data.x
+    """Sample the posterior distribution conditioned on observed data.
 
     Loads a trained density estimator checkpoint, reads the model architecture
     directly from it (no ``--model`` / ``--hidden`` / etc. flags required),
@@ -31,6 +31,13 @@ def inference(
         mach3sbi inference \\
             -i models/best.pt -r prior.pkl \\
             -n 100000 -o observed.parquet -s samples.parquet
+
+    :param posterior: Path to a trained density estimator checkpoint.
+    :param prior_path: Path to the pickled prior.
+    :param save_file: Destination parquet path for the samples.
+    :param n_samples: Number of posterior samples to draw.
+    :param observed_data_file: Parquet file holding the observed data vector.
+    :param nuisance_pars: fnmatch patterns for parameters to exclude.
     """
     logger = get_logger()
 
@@ -42,8 +49,6 @@ def inference(
         save_file.unlink()
 
     save_file.parent.mkdir(parents=True, exist_ok=True)
-
-    logger = get_logger()
 
     # PosteriorConfig is recovered from the checkpoint — the caller does not
     # need to supply (and cannot accidentally mismatch) architecture flags.

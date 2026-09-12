@@ -1,6 +1,5 @@
 """Train application module."""
 
-import os
 import warnings
 from pathlib import Path
 
@@ -31,17 +30,18 @@ def train_module(
     ema_alpha: float,
     learning_rate: float,
     stop_after_epochs: int,
+    min_delta: float,
     validation_fraction: float,
     num_workers: int,
+    limit_train_batches: int | None,
+    limit_val_batches: int | None,
     autosave_every: int,
     resume_checkpoint: Path | None,
     use_amp: bool,
-    print_interval: int,
     tensorboard_dir: Path | None,
     scheduler_patience: int,
     show_progress: bool,
     compile_model: bool,
-    prune_model: float | None,
     compress_x: bool,
     compress_theta: bool,
     compress_x_components: int,
@@ -71,6 +71,37 @@ def train_module(
             -r prior.pkl -d sims/ -s models/run.pt \\
             --resume_checkpoint models/last.ckpt \\
             --max_epochs 50000 --stop_after_epochs 200
+
+    :param save_file: Destination checkpoint path for the trained model.
+    :param prior_path: Path to the pickled prior.
+    :param dataset: Folder holding the merged ``theta.npy`` / ``x.npy`` pair.
+    :param model: Flow family, e.g. ``"maf"``, ``"nsf"``, ``"zuko_nsf"``.
+    :param hidden: Hidden units per layer.
+    :param dropout: Dropout probability during training.
+    :param num_blocks: Residual blocks per transform.
+    :param transforms: Number of autoregressive transforms.
+    :param num_bins: Spline bins, for spline-based flows.
+    :param batch_size: Samples per training batch.
+    :param max_epochs: Hard upper limit on training epochs.
+    :param ema_alpha: EMA smoothing factor for the validation loss.
+    :param learning_rate: Initial Adam learning rate.
+    :param stop_after_epochs: Early-stopping patience, in epochs.
+    :param min_delta: Smallest validation-loss change counted as an improvement.
+    :param validation_fraction: Fraction of rows held out for validation.
+    :param num_workers: DataLoader worker processes.
+    :param limit_train_batches: Batches per training epoch, or ``None`` for all.
+    :param limit_val_batches: Batches per validation pass, or ``None`` for all.
+    :param autosave_every: Write a periodic checkpoint every *N* epochs.
+    :param resume_checkpoint: Checkpoint to resume from, or ``None``.
+    :param use_amp: Enable bf16 mixed precision.
+    :param tensorboard_dir: Directory for TensorBoard events, or ``None``.
+    :param scheduler_patience: Epochs without improvement before the LR halves.
+    :param show_progress: Show progress bars.
+    :param compile_model: Compile the model with ``torch.compile``.
+    :param compress_x: Fit and apply a PCA compressor to the observables.
+    :param compress_theta: Fit and apply a PCA compressor to the parameters.
+    :param compress_x_components: Target dimensionality for compressed x.
+    :param compress_theta_components: Target dimensionality for compressed theta.
     """
     logger = get_logger()
 
@@ -83,18 +114,19 @@ def train_module(
         learning_rate=learning_rate,
         max_epochs=max_epochs,
         stop_after_epochs=stop_after_epochs,
+        min_delta=min_delta,
         validation_fraction=validation_fraction,
         num_workers=num_workers,
+        limit_train_batches=limit_train_batches,
+        limit_val_batches=limit_val_batches,
         autosave_every=autosave_every,
         resume_checkpoint=Path(resume_checkpoint) if resume_checkpoint else None,
         use_amp=use_amp,
-        print_interval=print_interval,
         show_progress=show_progress,
         tensorboard_dir=Path(tensorboard_dir) if tensorboard_dir else None,
         scheduler_patience=scheduler_patience,
         compile=compile_model,
         ema_alpha=ema_alpha,
-        prune_model=prune_model,
     )
 
     # Dataset loading is always required — shared CPU tensor, single load.

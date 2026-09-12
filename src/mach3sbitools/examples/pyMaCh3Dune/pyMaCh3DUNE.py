@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
-from yaml import safe_load
-
-from .helpers import process_parameters
 
 # NOTE: assuming `Manager` is exposed from the core pyMaCh3 module as
 # `pyMaCh3.manager.Manager` (not from pyMaCh3_DUNE). Adjust this import
 # to match wherever your core bindings actually expose it.
-from pyMaCh3_DUNE._pyMaCh3.manager import Manager
 from pyMaCh3_DUNE import parameters, samples
-
-HAS_PYMACH3 = True
+from pyMaCh3_DUNE._pyMaCh3.manager import Manager
+from yaml import safe_load
 
 from mach3sbitools.utils.logger import get_logger
+
+from .helpers import process_parameters
+
+HAS_PYMACH3 = True
 
 logger = get_logger()
 
@@ -87,9 +86,10 @@ class pyMaCh3DUNESimulator:
     # -----------------
     def simulate(self, theta: list[float] | np.ndarray) -> np.ndarray:
         """
-        Run the simulation step
-        :param theta: Parameter values
-        :return: Simulated data
+        Run the simulation step.
+
+        :param theta: Parameter values.
+        :returns: Simulated data bins.
         """
         self._set_parameter_values(theta)
         return np.concatenate(
@@ -97,30 +97,59 @@ class pyMaCh3DUNESimulator:
         )
 
     def get_parameter_names(self):
+        """
+        :returns: Names of the active parameters.
+        """
         return self._parameter_properties_masked.names
 
     def get_parameter_bounds(self):
+        """
+        :returns: Tuple of ``(lower_bounds, upper_bounds)`` arrays.
+        """
         return (
             self._parameter_properties_masked.lower_bounds,
             self._parameter_properties_masked.upper_bounds,
         )
 
     def get_is_flat(self, i: int):
+        """
+        :param i: Parameter index.
+        :returns: ``True`` if parameter *i* has a flat prior.
+        """
         return self._parameter_properties_masked.flat_priors[i]
 
     def get_data_bins(self):
+        """
+        :returns: The observed data bins.
+        """
         return self._data
 
     def get_parameter_nominals(self):
+        """
+        :returns: Nominal (central) values of the active parameters.
+        """
         return self._parameter_properties_masked.nominals
 
     def get_parameter_errors(self):
+        """
+        :returns: Prior uncertainties of the active parameters.
+        """
         return self._parameter_properties_masked.errors
 
     def get_covariance_matrix(self):
+        """
+        :returns: Covariance matrix of the active parameters.
+        """
         return self._parameter_properties_masked.covariance
 
     def get_log_likelihood(self, theta: list[float] | np.ndarray) -> float:
+        """
+        Evaluate the total log-likelihood at *theta*.
+
+        :param theta: Parameter values.
+        :returns: Sample plus prior log-likelihood, or ``-inf`` if *theta* is
+            out of bounds or the simulator raises.
+        """
         lower, upper = self.get_parameter_bounds()
         if np.any(theta < lower) or np.any(theta > upper):
             return float(-np.inf)

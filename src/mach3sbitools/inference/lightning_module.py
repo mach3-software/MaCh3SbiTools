@@ -7,18 +7,18 @@ import time
 import lightning as L
 import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.distributed._composable.fsdp import fully_shard
-
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+)
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.utils import get_logger, PosteriorConfig, TrainingConfig
+from mach3sbitools.utils import PosteriorConfig, TrainingConfig, get_logger
 
 logger = get_logger()
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
-
-# torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False)
 
 
 class SBILightningModule(L.LightningModule):
@@ -28,12 +28,21 @@ class SBILightningModule(L.LightningModule):
     Handles the training and validation steps, EMA-smoothed validation loss
     tracking, and the learning rate scheduler.
 
+    When compressors are supplied, every batch is transformed into the
+    compressed space before the loss is evaluated, so the density estimator
+    is trained in exactly the space that
+    :meth:`~mach3sbitools.inference.InferenceHandler.sample_posterior` later
+    conditions on.
+
     Metrics logged to TensorBoard
     ------------------------------
     Every epoch:
         train/loss, train/loss_std          — training loss mean and spread
-        val/loss, val/loss_std              — validation loss mean and spread
-        val/ema_loss                        — EMA-smoothed validation loss
+        val/loss, val/loss_std              — validation loss; what early
+                                              stopping, checkpointing and the
+                                              LR schedule all monitor
+        val/ema_loss                        — EMA-smoothed validation loss,
+                                              for inspection only
         diagnostics/train_val_gap           — overfitting signal
         diagnostics/loss_improvement        — absolute epoch-on-epoch improvement
         diagnostics/relative_improvement    — scale-independent convergence signal
@@ -67,6 +76,10 @@ class SBILightningModule(L.LightningModule):
         :param density_estimator: The ``sbi`` density estimator to train.
         :param config: Training loop hyperparameters.
         :param model_config: Architecture config embedded in every checkpoint.
+        :param x_compressor: Fitted compressor applied to every ``x`` batch,
+            or ``None`` to train on raw observables.
+        :param theta_compressor: Fitted compressor applied to every ``theta``
+            batch, or ``None`` to train on raw parameters.
         """
         super().__init__()
         self.model = density_estimator
@@ -86,6 +99,7 @@ class SBILightningModule(L.LightningModule):
         # Throughput state
         self._epoch_start_time: float = 0.0
         self._train_samples_seen: int = 0
+        self._grad_norms_logged_this_epoch: bool = False
 
         self._x_compressor = x_compressor
         self._theta_compressor = theta_compressor
@@ -115,12 +129,32 @@ class SBILightningModule(L.LightningModule):
         """
         return self.model.loss(theta, x)
 
+    def compress_batch(
+        self, theta: torch.Tensor, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Map a raw batch into the compressed space the model is trained in.
+
+        Either compressor may be ``None``, in which case that half of the
+        batch passes through untouched.
+
+        :param theta: Raw parameter batch.
+        :param x: Raw observable batch.
+        :returns: Tuple of ``(theta, x)`` in compressed space.
+        """
+        if self._theta_compressor is not None:
+            theta = self._theta_compressor.transform(theta)
+        if self._x_compressor is not None:
+            x = self._x_compressor.transform(x)
+        return theta, x
+
     # ── Training ──────────────────────────────────────────────────────────────
 
     def on_train_epoch_start(self) -> None:
         """Record epoch start time and reset sample counter."""
         self._epoch_start_time = time.perf_counter()
         self._train_samples_seen = 0
+        self._grad_norms_logged_this_epoch = False
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """
@@ -130,30 +164,34 @@ class SBILightningModule(L.LightningModule):
         :param batch_idx: Index of the current batch.
         :returns: Scalar mean loss.
         """
-        theta, x = batch
+        theta, x = self.compress_batch(*batch)
         loss_per_sample = self.model.loss(theta, x)
         loss = loss_per_sample.mean()
 
         self._train_samples_seen += theta.shape[0]
 
+        # sync_dist on a per-step metric costs an all-reduce every step. The
+        # step value is a per-rank diagnostic; only the epoch aggregate needs
+        # to agree across ranks.
         self.log(
             "train/loss",
             loss,
             on_step=True,
             on_epoch=True,
             prog_bar=True,
-            sync_dist=True,
+            sync_dist=False,
         )
         self.log(
             "train/loss_std",
             loss_per_sample.std(),
-            on_step=True,
-            on_epoch=False,
+            on_step=False,
+            on_epoch=True,
             sync_dist=True,
         )
         return loss
 
     def on_train_epoch_end(self) -> None:
+        """Log throughput, learning rate, GPU memory and weight statistics."""
         elapsed = time.perf_counter() - self._epoch_start_time
         do_expensive = self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS == 0
 
@@ -190,35 +228,65 @@ class SBILightningModule(L.LightningModule):
 
         # ── Expensive: weight statistics ──────────────────────────────────
         if do_expensive and self.trainer.is_global_zero:
-            total_param_norm_sq = 0.0
-            for name, p in self.model.named_parameters():
-                if not p.requires_grad:
-                    continue
-                # REMOVED logger_kwargs
-                self.log(f"weights/{name}/std", p.data.std(), sync_dist=False)
-                self.log(f"weights/{name}/max_abs", p.data.abs().max(), sync_dist=False)
-                total_param_norm_sq += p.data.norm(2).item() ** 2
-            self.log("train/param_norm", total_param_norm_sq**0.5, sync_dist=False)
+            self._log_parameter_norms()
+
+    def _log_parameter_norms(self) -> None:
+        """
+        Log per-layer weight statistics and the global parameter norm.
+
+        Norms are computed with ``torch._foreach_norm`` and logged as tensors:
+        calling ``.item()`` per parameter would force one device sync each,
+        which dominates the epoch for a small model with many small layers.
+        """
+        named = [
+            (name, p) for name, p in self.model.named_parameters() if p.requires_grad
+        ]
+        if not named:
+            return
+
+        tensors = [p.detach() for _, p in named]
+        norms = torch.stack(torch._foreach_norm(tensors))
+
+        for (name, _), norm in zip(named, norms, strict=True):
+            self.log(f"weights/{name}/norm", norm, sync_dist=False)
+
+        self.log("train/param_norm", norms.norm(2), sync_dist=False)
 
     def on_before_optimizer_step(self, optimizer) -> None:
+        """
+        Log gradient norms once per expensive-logging epoch.
+
+        This hook fires on every optimizer step, so the work is gated to the
+        first step of the epoch: gradient norms are a health check, not a
+        per-step metric, and reading them every step added a device sync per
+        parameter per step.
+
+        :param optimizer: The optimizer about to step. Unused — norms are read
+            straight off the model parameters.
+        """
         if (
             self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0
+            or self._grad_norms_logged_this_epoch
             or not self.trainer.is_global_zero
         ):
             return
 
-        total_grad_norm_sq = 0.0
-        for name, p in self.model.named_parameters():
-            if not p.requires_grad or p.grad is None:
-                continue
-            layer_grad_norm = p.grad.data.norm(2).item()
-            total_grad_norm_sq += layer_grad_norm**2
-            # REMOVED logger_kwargs
-            self.log(f"grad_norms/{name}", layer_grad_norm, sync_dist=False)
+        self._grad_norms_logged_this_epoch = True
 
-        self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
+        named = [
+            (name, p)
+            for name, p in self.model.named_parameters()
+            if p.requires_grad and p.grad is not None
+        ]
+        if not named:
+            return
 
+        norms = torch.stack(torch._foreach_norm([p.grad.detach() for _, p in named]))
 
+        for (name, _), norm in zip(named, norms, strict=True):
+            self.log(f"grad_norms/{name}", norm, sync_dist=False)
+
+        self.log("train/grad_norm", norms.norm(2), sync_dist=False)
 
     # ── Validation ────────────────────────────────────────────────────────────
 
@@ -230,7 +298,7 @@ class SBILightningModule(L.LightningModule):
         :param batch_idx: Index of the current batch.
         :returns: Scalar mean loss.
         """
-        theta, x = batch
+        theta, x = self.compress_batch(*batch)
         loss_per_sample = self.model.loss(theta, x)
         loss = loss_per_sample.mean()
 
@@ -258,6 +326,8 @@ class SBILightningModule(L.LightningModule):
         val_loss = float(self.trainer.callback_metrics.get("val/loss", float("inf")))
 
         # ── EMA update ────────────────────────────────────────────────────
+        # Diagnostic only: pleasant to eyeball on a TensorBoard curve, but
+        # nothing monitors it. See _build_callbacks for why.
         self.ema_val_loss = (
             val_loss
             if self.ema_val_loss == float("inf")
@@ -298,7 +368,15 @@ class SBILightningModule(L.LightningModule):
     # ── Optimiser ─────────────────────────────────────────────────────────────
 
     def configure_optimizers(self):
-        """Adam + ReduceLROnPlateau scheduler monitoring ``val/ema_loss``."""
+        """
+        Build the optimiser and LR schedule.
+
+        The scheduler watches the raw validation loss for the same reason the
+        callbacks do: it carries its own patience, so feeding it a smoothed
+        metric only delays the LR drop.
+
+        :returns: Lightning's optimizer/scheduler configuration dict.
+        """
         optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=self.lr,
@@ -314,13 +392,21 @@ class SBILightningModule(L.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val/ema_loss",
+                "monitor": "val/loss",
             },
         }
 
     # ── Checkpoint ────────────────────────────────────────────────────────────
     def on_save_checkpoint(self, checkpoint: dict) -> None:
-        """Embed model weights, architecture config, and epoch into checkpoint."""
+        """
+        Embed model weights, architecture config, compressors and epoch.
+
+        Storing the compressors alongside the weights is what lets
+        :meth:`~mach3sbitools.inference.InferenceHandler.load_posterior`
+        reconstruct the exact space the model was trained in.
+
+        :param checkpoint: Lightning's checkpoint dict, modified in place.
+        """
         options = StateDictOptions(full_state_dict=True, cpu_offload=True)
         checkpoint["model_state"] = get_model_state_dict(self.model, options=options)
         checkpoint["model_config"] = self.model_config
@@ -342,7 +428,11 @@ class SBILightningModule(L.LightningModule):
         )
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        """Restore EMA/diagnostics state saved by on_save_checkpoint."""
+        """
+        Restore EMA/diagnostics state saved by :meth:`on_save_checkpoint`.
+
+        :param checkpoint: Lightning's checkpoint dict.
+        """
         if "ema_val_loss" not in checkpoint:
             logger.warning("Checkpoint predates EMA-state saving; cold-starting EMA.")
         self.ema_val_loss = checkpoint.get("ema_val_loss", float("inf"))

@@ -1,12 +1,14 @@
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import click
 from click_option_group import optgroup
 
 from mach3sbitools.utils import (
     MaCh3Logger,
+    RunConfigError,
+    load_run_config,
 )
 
 from .diagnostics import diagnostics_module
@@ -23,9 +25,20 @@ from .train import train_module
 def apply_options(
     options: list[Any],
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-    """Generic decorator factory for any list of click options."""
+    """
+    Generic decorator factory for any list of click options.
+
+    :param options: Click option decorators to apply, outermost first.
+    :returns: A decorator that stacks *options* onto a command.
+    """
 
     def decorator(f: Callable[..., Any]) -> Callable[..., Any]:
+        """
+        Apply the captured options to *f*.
+
+        :param f: Click command function.
+        :returns: The decorated command.
+        """
         for option in reversed(options):
             f = option(f)
         return f
@@ -74,14 +87,12 @@ _SIMULATOR_OPTIONS = [
     click.option(
         "--cyclical_pars",
         "--cy",
-        type=Path,
         multiple=True,
         help="Parameter name patterns (fnmatch-style) that should use a cyclical sinusoidal prior over [-2π, 2π].",
     ),
     click.option(
         "--flipped_pars",
         "--fl",
-        type=Path,
         multiple=True,
         help="Parameter name patterns (fnmatch-style) that should flip around 0",
     ),
@@ -91,12 +102,56 @@ _SIMULATOR_OPTIONS = [
 # ── CLI root ───────────────────────────────────────────────────────────────────
 
 
+def _load_run_config(
+    ctx: click.Context, _param: click.Parameter, value: str | None
+) -> str | None:
+    """
+    Populate the context's default map from a YAML run configuration.
+
+    Runs eagerly, before any other option is processed, so click can fall back
+    to the file for options the user did not type. Options given on the
+    command line are never overwritten.
+
+    :param ctx: The click context being built.
+    :param _param: The ``--run_config`` parameter itself. Unused.
+    :param value: Path to the YAML file, or ``None``.
+    :returns: *value*, unchanged.
+    :raises click.BadParameter: If the file cannot be used as written.
+    """
+    if not value:
+        return value
+
+    assert ctx.command is not None
+    try:
+        ctx.default_map = load_run_config(Path(value), cast(click.Group, ctx.command))
+    except RunConfigError as error:
+        raise click.BadParameter(str(error)) from error
+
+    return value
+
+
 @click.group()
+@click.option(
+    "--run_config",
+    "-C",
+    type=click.Path(exists=True, dir_okay=False),
+    is_eager=True,
+    expose_value=False,
+    callback=_load_run_config,
+    help="YAML file supplying defaults for every subcommand, one section per "
+    "command plus a shared 'simulator' block. Options given on the command "
+    "line override it. Not to be confused with --config, which is the "
+    "simulator's own configuration file.",
+)
 @apply_options(_LOGGER_OPTIONS)
 def cli(log_file: Path | None, log_level: str) -> None:
     """mach3sbi — simulation-based inference tools for MaCh3.
 
     Run ``mach3sbi COMMAND --help`` for detailed usage of each subcommand.
+
+    Settings can come from a YAML run configuration instead of flags::
+
+        mach3sbi -C run.yaml train --max_epochs 5000
     """
     MaCh3Logger(
         name="mach3sbi",
@@ -210,6 +265,7 @@ def save_data(
     cyclical_pars: list[str],
     flipped_pars: list[str],
 ) -> None:
+    """Save the simulator's observed data bins to a parquet file."""
     save_data_module(
         simulator_module,
         simulator_class,
@@ -322,7 +378,16 @@ def save_data(
     default=100,
     type=int,
     show_default=True,
-    help="Stop if EMA validation loss has not improved for this many epochs.",
+    help="Stop if validation loss has not improved for this many epochs.",
+)
+@optgroup.option(
+    "--min_delta",
+    default=0.0,
+    type=float,
+    show_default=True,
+    help="Smallest validation-loss change that counts as an improvement for "
+    "early stopping. At the default of 0 any noise-level change resets the "
+    "patience counter; on a large dataset try something around 0.01.",
 )
 @optgroup.option(
     "--validation_fraction",
@@ -342,10 +407,26 @@ def save_data(
 @optgroup.group("Performance")
 @optgroup.option(
     "--num_workers",
-    default=1,
+    default=4,
     type=int,
     show_default=True,
-    help="Number of DataLoader worker processes.",
+    help="Number of DataLoader worker processes. Raise this when the dataset "
+    "is paged in from disk.",
+)
+@optgroup.option(
+    "--limit_train_batches",
+    default=None,
+    type=int,
+    help="Cap the batches per training epoch. Omit to use the whole split. "
+    "Setting it fixes how much work an epoch is, so checkpointing, LR "
+    "scheduling and early stopping stay on a sane cadence on a large dataset.",
+)
+@optgroup.option(
+    "--limit_val_batches",
+    default=None,
+    type=int,
+    help="Cap the batches per validation pass. Omit to validate the whole "
+    "split. A few hundred batches already pin the loss down.",
 )
 @optgroup.option(
     "--use_amp",
@@ -358,12 +439,6 @@ def save_data(
     is_flag=True,
     default=False,
     help="Compile with torch.compile. Reduces per-step time on supported hardware but increases startup time.",
-)
-@optgroup.option(
-    "--prune_model",
-    type=float,
-    default=None,
-    help="Prune the model. This reduces the number of nodes dynamically but may compromise accuracy.",
 )
 @optgroup.option(
     "--compress_x",
@@ -403,13 +478,6 @@ def save_data(
     help="Path to a checkpoint file to resume training from.",
 )
 @optgroup.option(
-    "--print_interval",
-    default=1,
-    type=int,
-    show_default=True,
-    help="Log training progress every N epochs.",
-)
-@optgroup.option(
     "--tensorboard_dir",
     default=None,
     help="Directory for TensorBoard event files. Omit to disable TensorBoard logging.",
@@ -435,17 +503,18 @@ def train(
     ema_alpha: float,
     learning_rate: float,
     stop_after_epochs: int,
+    min_delta: float,
     validation_fraction: float,
     num_workers: int,
+    limit_train_batches: int | None,
+    limit_val_batches: int | None,
     autosave_every: int,
     resume_checkpoint: Path | None,
     use_amp: bool,
-    print_interval: int,
     tensorboard_dir: Path | None,
     scheduler_patience: int,
     show_progress: bool,
     compile_model: bool,
-    prune_model: float | None,
     compress_x: bool,
     compress_theta: bool,
     compress_x_components: int,
@@ -470,35 +539,36 @@ def train(
     """
 
     train_module(
-        save_file,
-        prior_path,
-        dataset,
-        model,
-        hidden,
-        dropout,
-        num_blocks,
-        transforms,
-        num_bins,
-        batch_size,
-        max_epochs,
-        ema_alpha,
-        learning_rate,
-        stop_after_epochs,
-        validation_fraction,
-        num_workers,
-        autosave_every,
-        resume_checkpoint,
-        use_amp,
-        print_interval,
-        tensorboard_dir,
-        scheduler_patience,
-        show_progress,
-        compile_model,
-        prune_model,
-        compress_x,
-        compress_theta,
-        compress_x_components,
-        compress_theta_components,
+        save_file=save_file,
+        prior_path=prior_path,
+        dataset=dataset,
+        model=model,
+        hidden=hidden,
+        dropout=dropout,
+        num_blocks=num_blocks,
+        transforms=transforms,
+        num_bins=num_bins,
+        batch_size=batch_size,
+        max_epochs=max_epochs,
+        ema_alpha=ema_alpha,
+        learning_rate=learning_rate,
+        stop_after_epochs=stop_after_epochs,
+        min_delta=min_delta,
+        validation_fraction=validation_fraction,
+        num_workers=num_workers,
+        limit_train_batches=limit_train_batches,
+        limit_val_batches=limit_val_batches,
+        autosave_every=autosave_every,
+        resume_checkpoint=resume_checkpoint,
+        use_amp=use_amp,
+        tensorboard_dir=tensorboard_dir,
+        scheduler_patience=scheduler_patience,
+        show_progress=show_progress,
+        compile_model=compile_model,
+        compress_x=compress_x,
+        compress_theta=compress_theta,
+        compress_x_components=compress_x_components,
+        compress_theta_components=compress_theta_components,
     )
 
 
@@ -629,7 +699,8 @@ def importance_sample(
     nuisance_pars: list[str],
     cyclical_pars: list[str],
     flipped_pars: list[str],
-):
+) -> None:
+    """Reweight posterior samples against the simulator's true likelihood."""
     importance_sample_module(
         simulator_module,
         simulator_class,
@@ -697,7 +768,7 @@ def diagnostics(
     n_prior_samples: int,
     n_posterior_samples: int,
 ) -> None:
-
+    """Run posterior diagnostics (SBC, coverage, TARP, log-likelihood)."""
     diagnostics_module(
         simulator_module,
         simulator_class,
@@ -719,5 +790,6 @@ def diagnostics(
 @cli.command(short_help="Merge feather files")
 @click.option("--simulation_dir", "-s")
 @click.option("--output_file", "-o")
-def merge_shards(simulation_dir: Path, output_file: Path):
+def merge_shards(simulation_dir: Path, output_file: Path) -> None:
+    """Merge a folder of feather shards into memmap-backed theta/x arrays."""
     merge_shards_module(Path(simulation_dir), Path(output_file))

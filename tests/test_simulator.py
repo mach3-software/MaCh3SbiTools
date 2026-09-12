@@ -17,7 +17,7 @@ from mach3sbitools.simulator.priors.prior import (
     load_prior,
 )
 from mach3sbitools.simulator.simulator import Simulator
-from mach3sbitools.utils import TorchDeviceHandler, from_feather
+from mach3sbitools.utils import from_feather
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -25,7 +25,6 @@ from mach3sbitools.utils import TorchDeviceHandler, from_feather
 
 
 def _make_prior(n: int = 5) -> Prior:
-    dh = TorchDeviceHandler()
     data = PriorData(
         parameter_names=np.array([f"p{i}" for i in range(n)]),
         nominals=torch.ones(n),
@@ -33,7 +32,7 @@ def _make_prior(n: int = 5) -> Prior:
         lower_bounds=torch.full((n,), -5.0),
         upper_bounds=torch.full((n,), 5.0),
     )
-    return Prior(prior_data=data).to(dh.device)
+    return Prior(prior_data=data)
 
 
 @pytest.fixture
@@ -148,7 +147,7 @@ class TestSimulatorPersistence:
         theta, x = simulator.simulate(10)
         path = tmp_path / "data.feather"
         simulator.save(path, theta, x)
-        t, x2 = from_feather(path, simulator.prior.nuisance_filter)
+        t, x2 = from_feather(path)
         assert len(t) == len(x2) == 10
 
     def test_save_data_creates_parquet(self, dummy_config, tmp_path):

@@ -44,7 +44,12 @@ def make_param_sliders(
 
 
 def make_samples_slider(value: int = 100_000) -> widgets.IntSlider:
-    """Build an ``N Samples`` slider controlling posterior sample count."""
+    """
+    Build an ``N Samples`` slider controlling posterior sample count.
+
+    :param value: Initial slider value.
+    :returns: The configured slider.
+    """
     return widgets.IntSlider(
         value=value,
         min=1,
@@ -57,7 +62,12 @@ def make_samples_slider(value: int = 100_000) -> widgets.IntSlider:
 
 
 def make_toys_slider(value: int = 10) -> widgets.IntSlider:
-    """Build an ``N Toys`` slider controlling Poisson-fluctuation toy count."""
+    """
+    Build an ``N Toys`` slider controlling Poisson-fluctuation toy count.
+
+    :param value: Initial slider value.
+    :returns: The configured slider.
+    """
     return widgets.IntSlider(
         value=value,
         min=1,
@@ -70,7 +80,12 @@ def make_toys_slider(value: int = 10) -> widgets.IntSlider:
 
 
 def make_bins_slider(value: int = 100) -> widgets.IntSlider:
-    """Build an ``N Bins`` slider controlling histogram/corner-plot binning."""
+    """
+    Build an ``N Bins`` slider controlling histogram/corner-plot binning.
+
+    :param value: Initial slider value.
+    :returns: The configured slider.
+    """
     return widgets.IntSlider(
         value=value,
         min=1,
@@ -83,7 +98,11 @@ def make_bins_slider(value: int = 100) -> widgets.IntSlider:
 
 
 def make_toggles() -> tuple[widgets.Checkbox, widgets.Checkbox]:
-    """Build the ``Fill Hists?`` and ``Show Min/Max?`` checkboxes."""
+    """
+    Build the ``Fill Hists?`` and ``Show Min/Max?`` checkboxes.
+
+    :returns: Tuple of ``(hist_fill, minmax_toggle)`` checkboxes.
+    """
     hist_fill = widgets.Checkbox(value=False, description="Fill Hists?", indent=False)
     minmax_toggle = widgets.Checkbox(
         value=False, description="Show Min/Max?", indent=False

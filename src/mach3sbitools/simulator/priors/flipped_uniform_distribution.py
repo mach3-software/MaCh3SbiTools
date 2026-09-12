@@ -48,6 +48,12 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
         lower: float,
         upper: float,
     ) -> None:
+        """
+        :param nominals: Nominal (centre) values, one per parameter.
+        :param lower: Positive lower edge of the positive region.
+        :param upper: Positive upper edge of the positive region.
+        :raises ValueError: If ``0 < lower < upper`` is violated.
+        """
         if lower <= 0 or upper <= lower:
             raise ValueError(
                 f"FlippedUniformDistribution requires 0 < lower < upper, "
@@ -58,8 +64,6 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
         self.device = nominals.device
         self._lower = torch.tensor(lower, dtype=torch.double, device=self.device)
         self._upper = torch.tensor(upper, dtype=torch.double, device=self.device)
-
-        print(self._upper, self._lower)
 
         self._width = self._upper - self._lower  # width of one region
         self._pdf_val = 0.5 / self._width  # constant density on each region
@@ -74,10 +78,13 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
 
     @property
     def mean(self) -> torch.Tensor:
-        """Mean of the distribution.
+        """
+        Mean of the distribution.
 
         By symmetry (equal mass on positive and negative regions) the mean
         is exactly zero, regardless of ``lower`` and ``upper``.
+
+        :returns: Zero tensor of shape ``(n_params,)``.
         """
         return torch.zeros(len(self.nominals), dtype=torch.double, device=self.device)
 
@@ -93,6 +100,8 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
             \\text{Var} = \\frac{(b^2 + ab + a^2)}{3}
 
         which equals the second moment (the first moment is zero by symmetry).
+
+        :returns: Variance tensor of shape ``(n_params,)``.
         """
         a, b = self._lower, self._upper
         var_scalar = (b**2 + a * b + a**2) / 3.0
@@ -183,7 +192,12 @@ class FlippedUniformDistribution(torch.distributions.Distribution):
         return self.sample(sample_shape)
 
     def to(self, device: torch.device | str) -> "FlippedUniformDistribution":
-        """Move cached tensors to *device* in-place."""
+        """
+        Move cached tensors to *device* in-place.
+
+        :param device: Target torch device.
+        :returns: This instance.
+        """
         self.device = torch.device(device)
         self.nominals = self.nominals.to(device)
         self._lower = self._lower.to(device)

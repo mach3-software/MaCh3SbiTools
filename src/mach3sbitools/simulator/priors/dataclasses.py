@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from mach3sbitools.utils import TorchDeviceHandler
+from mach3sbitools.utils import get_device, to_tensor
 
 
 @dataclass(eq=False, repr=False)
@@ -31,21 +31,21 @@ class PriorData(torch.nn.Module):
     lower_bounds: torch.Tensor
     upper_bounds: torch.Tensor
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """
+        Initialise the Module base and coerce every field to a tensor.
+
+        Fields may arrive as numpy arrays or lists, so this converts rather
+        than only moving.
+        """
         super().__init__()
-        self._check_device()
+        device = get_device()
+        self.nominals = to_tensor(self.nominals, device)
+        self.covariance_matrix = to_tensor(self.covariance_matrix, device)
+        self.lower_bounds = to_tensor(self.lower_bounds, device)
+        self.upper_bounds = to_tensor(self.upper_bounds, device)
 
-    def _check_device(self):
-        handler = TorchDeviceHandler()
-        if self.nominals.device == handler.device:
-            return
-
-        self.nominals = handler.to_tensor(self.nominals)
-        self.covariance_matrix = handler.to_tensor(self.covariance_matrix)
-        self.lower_bounds = handler.to_tensor(self.lower_bounds)
-        self.upper_bounds = handler.to_tensor(self.upper_bounds)
-
-    def to(self, device: torch.device | str) -> "PriorData":
+    def to(self, device: torch.device | str) -> "PriorData":  # type: ignore[override]
         """
         Move all tensor fields to *device* in-place.
 
@@ -69,13 +69,11 @@ class PriorData(torch.nn.Module):
         :param mask: Boolean tensor of shape ``(n_params,)``.
         :returns: New :class:`PriorData` containing only the selected parameters.
         """
-        self._check_device()
         np_mask = mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
-        handler = TorchDeviceHandler()
-        # Match the mask to wherever this instance's data actually lives,
-        # rather than trusting handler.device — avoids CPU/CUDA mismatches
-        # if this PriorData was moved independently of the global handler.
-        tensor_mask = handler.to_tensor(mask).to(self.nominals.device)
+        # Match the mask to wherever this instance's data actually lives, not
+        # to the globally detected device: this PriorData may have been moved
+        # on its own.
+        tensor_mask = to_tensor(mask, device=self.nominals.device)
 
         return PriorData(
             parameter_names=self.parameter_names[np_mask],

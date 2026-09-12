@@ -1,8 +1,10 @@
 """
-Tests for mach3sbitools.simulator.priors.cyclical_distribution.
+Analytical and statistical properties of the cyclical prior.
 
 Statistical property tests share a single large sample draw via a
-session-scoped fixture to avoid redundant sampling overhead.
+session-scoped fixture to avoid redundant sampling overhead. Shape, support
+and device behaviour shared with the other priors is in
+test_prior_distributions.py.
 """
 
 from typing import cast
@@ -31,16 +33,32 @@ def large_samples(cyclical_distribution) -> torch.Tensor:
 
 
 def test_log_prob(cyclical_distribution):
+    """log_prob is log(pdf) in support, and -inf outside it."""
     theta = torch.tensor([[0.0], [10.0], [1.0]], dtype=torch.double)
     l_one = 0.5 * (np.sin(0.25 * (1 + 2 * np.pi)) ** 2) / np.pi
     expected = torch.tensor(
-        [[-np.log(0.5 / np.pi)], [torch.tensor(np.float64("-inf"))], [-np.log(l_one)]],
+        [[np.log(0.5 / np.pi)], [-np.inf], [np.log(l_one)]],
         dtype=torch.double,
     )
 
     log_dist = cyclical_distribution.log_prob(theta)
 
     assert torch.allclose(log_dist, expected)
+
+
+@pytest.mark.parametrize("theta", [-10.0, 10.0, 100.0])
+def test_log_prob_is_negative_infinity_outside_support(cyclical_distribution, theta):
+    """Out-of-support points must be rejected, not made infinitely likely."""
+    value = torch.tensor([[theta]], dtype=torch.double)
+    assert cyclical_distribution.log_prob(value).item() == -np.inf
+
+
+def test_log_prob_matches_log_of_pdf(cyclical_distribution):
+    theta = torch.linspace(-6.0, 6.0, 25, dtype=torch.double).unsqueeze(-1)
+    torch.testing.assert_close(
+        cyclical_distribution.log_prob(theta),
+        torch.log(cyclical_distribution.pdf(theta)),
+    )
 
 
 def test_cdf(cyclical_distribution):
@@ -53,17 +71,6 @@ def test_cdf(cyclical_distribution):
 # ─────────────────────────────────────────────────────────────────────────────
 # Sample shape — parametrized
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "shape,expected",
-    [
-        (torch.Size([100]), torch.Size([100, 1])),
-        (torch.Size([]), torch.Size([1])),
-    ],
-)
-def test_sample_shape(cyclical_distribution, shape, expected):
-    assert cyclical_distribution.sample(shape).shape == expected
 
 
 # ─────────────────────────────────────────────────────────────────────────────

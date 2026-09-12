@@ -1,0 +1,87 @@
+# Example mach3sbi run configuration.
+#
+#   mach3sbi -C run.yaml train
+#   mach3sbi -C run.yaml train --max_epochs 20000   # the flag wins
+#
+# One section per subcommand, plus a shared `simulator` block whose keys are
+# offered to every command that accepts them. Anything the file gets wrong --
+# an unknown section, a misspelt option -- is reported before the command runs.
+
+logging:
+  log_level: INFO
+  log_file: logs/run.log
+
+# Offered to create_prior, simulate, save_data, diagnostics and
+# importance-sample. A command's own section overrides these.
+simulator:
+  simulator_module: mypackage.simulator
+  simulator_class: MySimulator
+  config: fitter.yaml
+  nuisance_pars: ["syst_*"]
+  cyclical_pars: ["delta_cp"]
+  flipped_pars: []
+
+create_prior:
+  output_file: prior/my_prior.pkl
+
+simulate:
+  n_simulations: 100000
+  output_file: sims/shard.feather
+  prior_file: prior/my_prior.pkl
+
+save_data:
+  output_file: data/observed.parquet
+
+merge_shards:
+  simulation_dir: sims/
+  output_file: merged/
+
+train:
+  prior_path: prior/my_prior.pkl
+  dataset: merged/
+  save_file: models/run.ckpt
+
+  model: maf
+  hidden: 256
+  transforms: 8
+  num_blocks: 2
+  num_bins: 10
+  dropout: 0.1
+
+  batch_size: 2048
+  max_epochs: 50000
+  learning_rate: 0.0005
+  validation_fraction: 0.1
+
+  # Early stopping, checkpoint selection and the LR schedule all watch the raw
+  # val/loss. Patience is counted in epochs, so it means whatever an epoch
+  # costs -- see limit_train_batches below.
+  stop_after_epochs: 200
+  scheduler_patience: 20
+
+  # Smallest val/loss change that counts as an improvement. At 0 (the default)
+  # noise-level changes keep resetting the patience counter, which on a large
+  # dataset can add hours to a run that has already converged.
+  min_delta: 0.01
+
+  # Raise this when the dataset is paged in from disk, so reads for the next
+  # batch overlap with compute on the current one.
+  num_workers: 8
+
+  # On a dataset of tens of millions of rows a full pass is an arbitrary and
+  # very expensive unit. Fixing the batches per epoch puts checkpointing, LR
+  # scheduling and early stopping back on a cadence of minutes. Omit both to
+  # use the whole split.
+  limit_train_batches: 2000
+  limit_val_batches: 200
+
+  autosave_every: 10
+  tensorboard_dir: logs/tensorboard
+  show_progress: true
+
+inference:
+  posterior: models/run.ckpt
+  prior_path: prior/my_prior.pkl
+  observed_data_file: data/observed.parquet
+  save_file: results/samples.parquet
+  n_samples: 100000

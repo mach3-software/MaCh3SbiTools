@@ -152,17 +152,30 @@ class SimulatorProtocol(Protocol):
 
     def get_log_likelihood(self, theta: list[float]) -> float:
         """
-        For a given theta value, returns the log-likelihood
+        For a given theta value, returns the log-likelihood.
 
-        :param theta:
-        :return: _description_
-        :rtype: float
+        :param theta: Parameter vector of length ``n_params``.
+        :returns: Log-likelihood of the data given *theta*.
         """
         ...
 
 
 def _implements(proto: type) -> Callable[[type], type]:
+    """
+    Build a class decorator asserting structural conformance to *proto*.
+
+    :param proto: Protocol whose public methods must all be present.
+    :returns: A decorator that validates the class it is applied to.
+    """
+
     def _deco(cls_def):
+        """
+        Check *cls_def* implements every public method of the protocol.
+
+        :param cls_def: The class being decorated.
+        :returns: *cls_def*, unchanged.
+        :raises TypeError: If any protocol method is missing.
+        """
         proto_methods = {
             name
             for name, _ in inspect.getmembers(proto, predicate=inspect.isfunction)

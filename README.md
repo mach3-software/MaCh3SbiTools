@@ -49,6 +49,45 @@ uv pip install .
 conda install .
 ```
 
+## Configuration
+
+Every subcommand takes its settings from flags, or from a single YAML run
+configuration shared across the whole study:
+
+```bash
+mach3sbi -C run.yaml train                    # everything from the file
+mach3sbi -C run.yaml train --max_epochs 20000 # the flag wins
+```
+
+The file has one section per subcommand plus a shared `simulator` block whose
+keys reach every command that accepts them. Unknown sections and misspelt
+options are reported before the command runs, rather than being ignored.
+See [`docs/example_run_config.yaml`](docs/example_run_config.yaml) for a
+fully commented template.
+
+Note `-C/--run_config` is the mach3sbi run configuration; `-c/--config` is the
+simulator's own config file (e.g. a MaCh3 fitter YAML).
+
+## Training on large datasets
+
+Once the merged dataset runs to tens of millions of rows, a full pass stops
+being a useful unit of work: an epoch can take minutes, and every cadence in
+the config is counted in epochs. Three settings matter most:
+
+| setting               | why                                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| `num_workers`         | one worker cannot keep a GPU fed from a disk-backed dataset                                               |
+| `limit_train_batches` | fixes what an epoch costs, so checkpointing, LR scheduling and early stopping stay on a sane cadence      |
+| `limit_val_batches`   | a few hundred batches pin the validation loss down; validating the whole split every epoch is wasted time |
+
+Early stopping, checkpoint selection and the learning-rate schedule all watch
+the raw `val/loss`. The EMA-smoothed `val/ema_loss` is still logged, but
+nothing decides from it: its minimum trails the true one by roughly
+`(1 - ema_alpha) / ema_alpha` epochs, which both delays stopping and makes the
+kept checkpoint a later, worse one. Set `min_delta` to the smallest loss
+change you would act on, or noise alone will keep resetting the patience
+counter.
+
 ## Tutorials
 
 - For install information see the [install guide](https://mach3-software.github.io/MaCh3SbiTools/modules/getting_started/installation.html)

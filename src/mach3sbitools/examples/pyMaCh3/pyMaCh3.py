@@ -87,9 +87,10 @@ class pyMaCh3Simulator:
     # -----------------
     def simulate(self, theta: list[float] | np.ndarray) -> np.ndarray:
         """
-        Run the simulation step
-        :param theta: Parameter values
-        :return: Simulated data
+        Run the simulation step.
+
+        :param theta: Parameter values.
+        :returns: Simulated data bins.
         """
         self._set_parameter_values(theta)
         return np.concatenate(
@@ -97,30 +98,59 @@ class pyMaCh3Simulator:
         )
 
     def get_parameter_names(self):
+        """
+        :returns: Names of the active parameters.
+        """
         return self._parameter_properties_masked.names
 
     def get_parameter_bounds(self):
+        """
+        :returns: Tuple of ``(lower_bounds, upper_bounds)`` arrays.
+        """
         return (
             self._parameter_properties_masked.lower_bounds,
             self._parameter_properties_masked.upper_bounds,
         )
 
     def get_is_flat(self, i: int):
+        """
+        :param i: Parameter index.
+        :returns: ``True`` if parameter *i* has a flat prior.
+        """
         return self._parameter_properties_masked.flat_priors[i]
 
     def get_data_bins(self):
+        """
+        :returns: The observed data bins.
+        """
         return self._data
 
     def get_parameter_nominals(self):
+        """
+        :returns: Nominal (central) values of the active parameters.
+        """
         return self._parameter_properties_masked.nominals
 
     def get_parameter_errors(self):
+        """
+        :returns: Prior uncertainties of the active parameters.
+        """
         return self._parameter_properties_masked.errors
 
     def get_covariance_matrix(self):
+        """
+        :returns: Covariance matrix of the active parameters.
+        """
         return self._parameter_properties_masked.covariance
 
     def get_log_likelihood(self, theta: list[float] | np.ndarray) -> float:
+        """
+        Evaluate the total log-likelihood at *theta*.
+
+        :param theta: Parameter values.
+        :returns: Sample plus prior log-likelihood, or ``-inf`` if the prior
+            term signals an out-of-bounds point.
+        """
         self._set_parameter_values(theta)
         prior_llh: float = self.parameter_handler.calculate_likelihood()
         if prior_llh > 1234567:
@@ -141,10 +171,11 @@ class pyMaCh3Simulator:
         parameter_handler: m3.parameters.ParameterHandlerGeneric,
     ) -> list[m3.samples.SampleHandlerTutorial]:
         """
-        Load in the samples from the MaCh3 fitter config
-        :param yaml_cfg: Main config
-        :param parameter_handler: A list of fitter configs
-        :return:
+        Load in the samples from the MaCh3 fitter config.
+
+        :param yaml_cfg: Main config.
+        :param parameter_handler: A list of fitter configs.
+        :returns: The configured sample handlers.
         """
         samples = yaml_cfg.get("General", {}).get("TutorialSamples")
         if samples is None:

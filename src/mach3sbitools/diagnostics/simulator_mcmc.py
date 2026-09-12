@@ -35,10 +35,16 @@ class ChainState:
 
     @property
     def n_chains(self) -> int:
+        """
+        :returns: Number of chains being advanced in parallel.
+        """
         return int(self.current_step.shape[0])
 
     @property
     def n_pars(self) -> int:
+        """
+        :returns: Number of parameters per chain.
+        """
         return int(self.current_step.shape[1])
 
 
@@ -57,11 +63,19 @@ class ParquetSink:
     buffer: list[tuple[int, Tensor, Tensor]] = field(default_factory=list)
 
     def append(self, step: int, pars: Tensor, logl: Tensor) -> None:
+        """
+        Buffer one step, flushing to disk once the buffer is full.
+
+        :param step: Global step number.
+        :param pars: Parameters of shape ``(n_chains, n_pars)``.
+        :param logl: Log-likelihoods of shape ``(n_chains,)``.
+        """
         self.buffer.append((step, pars.clone(), logl.clone()))
         if len(self.buffer) >= self.buffer_size:
             self.flush()
 
     def flush(self) -> None:
+        """Write the buffered steps out as a parquet row group."""
         if not self.buffer:
             return
 
@@ -88,12 +102,22 @@ class ParquetSink:
         self.buffer.clear()
 
     def close(self) -> None:
+        """Flush any remaining rows and close the parquet writer."""
         self.flush()
         self.writer.close()
 
 
 class SimulatorMCMC:
+    """
+    Adaptive Metropolis-Hastings sampler over the simulator's true likelihood.
+
+    Used as a reference chain to compare an NPE posterior against.
+    """
+
     def __init__(self, simulator: Simulator) -> None:
+        """
+        :param simulator: Simulator supplying the likelihood and the prior.
+        """
         self.simulator = simulator
 
         # just to be easier
@@ -108,12 +132,23 @@ class SimulatorMCMC:
         self._state: ChainState | None = None
 
     def _require_state(self) -> ChainState:
-        """Narrows self._state to ChainState for the type checker, or raises."""
+        """
+        Narrow :attr:`_state` to a :class:`ChainState` for the type checker.
+
+        :returns: The live chain state.
+        :raises ValueError: If :meth:`run` has not been called.
+        """
         if self._state is None:
             raise ValueError("Chain has not been initialised - call run() first!")
         return self._state
 
     def create_asimov_data(self, par_values: list[float] | None) -> None:
+        """
+        Replace the observed data with a noiseless simulation.
+
+        :param par_values: Parameters to simulate at, or ``None`` to use the
+            prior nominals.
+        """
         if par_values is None:
             par_values = self.prior.prior_data.nominals.tolist()
 
@@ -121,9 +156,13 @@ class SimulatorMCMC:
 
     def get_logl(self, par_values: Tensor) -> Tensor:
         """
-        Negative log-likelihood calculation, vectorised over chains.
-        par_values: (n_chains, n_pars)
-        returns:    (n_chains,)
+        Log-likelihood for every chain.
+
+        The simulator's likelihood is not vectorisable, so the chains are
+        evaluated in a Python loop.
+
+        :param par_values: Parameters of shape ``(n_chains, n_pars)``.
+        :returns: Log-likelihoods of shape ``(n_chains,)``.
         """
 
         logl = torch.full((len(par_values),), torch.inf)
@@ -136,7 +175,10 @@ class SimulatorMCMC:
 
     def _sample_initial_values(self, n_chains: int) -> Tensor:
         """
-        Draws starting points for each chain from N(nominal_values, covariance_matrix).
+        Draw starting points from ``N(nominals, covariance)``.
+
+        :param n_chains: Number of chains to seed.
+        :returns: Starting points of shape ``(n_chains, n_pars)``.
         """
         mean = self.prior.prior_data.nominals
         cov = self.prior.prior_data.covariance_matrix
@@ -145,6 +187,14 @@ class SimulatorMCMC:
         return dist.sample((n_chains,)).to(torch.double)
 
     def _init_state(self, n_chains: int, initial_values: Tensor | None) -> ChainState:
+        """
+        Build the initial chain state.
+
+        :param n_chains: Number of chains to run.
+        :param initial_values: Explicit starting points, or ``None`` to draw
+            them from the prior.
+        :returns: A freshly initialised :class:`ChainState`.
+        """
         if initial_values is None:
             initial_values = self._sample_initial_values(n_chains)
 
@@ -169,7 +219,15 @@ class SimulatorMCMC:
         )
 
     def _propose_step(self, state: ChainState) -> Tensor:
-        """Draws a new proposal per chain from N(current_step, adaptive_matrix)."""
+        """
+        Draw one proposal per chain from ``N(current_step, adaptive_matrix)``.
+
+        Flipped parameters get a random sign, and cyclical parameters are
+        wrapped back into ``[-pi, pi)``.
+
+        :param state: Current chain state.
+        :returns: Proposals of shape ``(n_chains, n_pars)``.
+        """
         L = torch.linalg.cholesky(state.adaptive_matrix).to(torch.double)
         z = torch.randn_like(state.current_step).to(torch.double)
         prop = state.current_step + torch.einsum("cij,cj->ci", L, z)
@@ -190,7 +248,15 @@ class SimulatorMCMC:
         return prop
 
     def _accept_step(self, state: ChainState, par_values: Tensor) -> Tensor:
-        """Metropolis hastings accepted/reject condition. Mutates state in place."""
+        """
+        Apply the Metropolis-Hastings accept/reject condition.
+
+        Mutates *state* in place for the chains that accept.
+
+        :param state: Current chain state.
+        :param par_values: Proposals of shape ``(n_chains, n_pars)``.
+        :returns: Boolean acceptance mask of shape ``(n_chains,)``.
+        """
 
         acc_prob = self.get_logl(par_values)
         n_chains = len(acc_prob)
@@ -209,7 +275,11 @@ class SimulatorMCMC:
     def _adaptive_step(self, state: ChainState, step_number: int) -> None:
         """
         Haario adaptive covariance update, vectorised over chains.
-        Mutates state.adaptive_mean and state.adaptive_matrix in place.
+
+        Mutates ``state.adaptive_mean`` and ``state.adaptive_matrix`` in place.
+
+        :param state: Current chain state.
+        :param step_number: Number of adaptation steps taken so far.
         """
 
         n_pars = state.n_pars
@@ -248,6 +318,14 @@ class SimulatorMCMC:
     def _open_parquet(
         self, outfile: str, par_names: list[str], buffer_size: int
     ) -> ParquetSink:
+        """
+        Open the output parquet file and wrap it in a buffered sink.
+
+        :param outfile: Destination parquet path.
+        :param par_names: Column name per parameter.
+        :param buffer_size: Steps buffered before each row-group flush.
+        :returns: A sink ready to accept steps.
+        """
         schema = pa.schema(
             [("step", pa.int64()), ("chain", pa.int64())]
             + [(name, pa.float64()) for name in par_names]
@@ -270,9 +348,19 @@ class SimulatorMCMC:
         par_names: list[str] | None = None,
     ) -> ChainState:
         """
-        Initialises, runs, and streams the full chain to a parquet file in one call.
+        Initialise, run, and stream the full chain to a parquet file.
 
-        Returns the final ChainState (e.g. for inspecting acceptance rates).
+        :param n_steps: Steps to run per chain.
+        :param n_chains: Number of chains to advance in parallel.
+        :param adapt_start: Step at which covariance adaptation begins.
+        :param outfile: Destination parquet path.
+        :param buffer_size: Steps buffered before each row-group flush.
+        :param adapt_every: Adapt once every this many steps.
+        :param initial_values: Explicit starting points, or ``None`` to draw
+            them from the prior.
+        :param par_names: Column name per parameter. Defaults to ``par_i``.
+        :returns: The final chain state, e.g. for inspecting acceptance rates.
+        :raises ValueError: If *par_names* has the wrong length.
         """
 
         state = self._init_state(n_chains, initial_values)
@@ -307,7 +395,10 @@ class SimulatorMCMC:
 
     @property
     def acceptance_rate(self) -> Tensor:
-        """Per-chain acceptance rate over the whole run so far."""
+        """
+        :returns: Per-chain acceptance rate over the whole run so far.
+        :raises ValueError: If no steps have been run.
+        """
         state = self._require_state()
         if state.total_steps == 0:
             raise ValueError("No steps have been run yet!")

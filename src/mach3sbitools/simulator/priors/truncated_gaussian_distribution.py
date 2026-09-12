@@ -23,6 +23,14 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         lower_bounds: torch.Tensor,
         upper_bounds: torch.Tensor,
     ) -> None:
+        """
+        :param mean: Mean vector of shape ``(n_params,)``.
+        :param covariance: Covariance matrix of shape ``(n_params, n_params)``.
+            It is symmetrised, and an eigenvalue floor is applied if the
+            Cholesky factorisation fails.
+        :param lower_bounds: Per-parameter lower truncation bounds.
+        :param upper_bounds: Per-parameter upper truncation bounds.
+        """
         # ── Symmetrise + Cholesky with eigenvalue-floor fallback ───────────
         cov = (covariance + covariance.T) / 2.0
         min_eig_floor = 1e-9
@@ -68,7 +76,12 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     # ── Bounds helper ───────────────────────────────────────────────────────
 
     def in_bounds(self, value: torch.Tensor) -> torch.Tensor:
-        """Check if values are strictly within the bounding box."""
+        """
+        Check whether each row lies inside the bounding box.
+
+        :param value: Tensor of shape ``(..., n_params)``.
+        :returns: Boolean mask of shape ``(...,)``.
+        """
         return torch.all(
             (value >= self._lower_bounds) & (value <= self._upper_bounds), dim=-1
         )
@@ -78,7 +91,14 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         """
         Log probability density.
-        Returns the true Gaussian log-density inside bounds, and -inf outside.
+
+        Returns the true Gaussian log-density inside the bounds and ``-inf``
+        outside. The density is unnormalised: the truncation mass is not
+        divided out, which is harmless for the rejection sampling and
+        relative comparisons this prior is used for.
+
+        :param value: Tensor of shape ``(..., n_params)``.
+        :returns: Log-density of shape ``(...,)``.
         """
         in_b = self.in_bounds(value)
         lp = torch.full(
@@ -100,6 +120,9 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         Iterates over dimensions. At each step, the conditional bounds are
         computed from already-sampled variables. A batch of 1-D truncated
         normals is then sampled simultaneously via SciPy's inverse-CDF.
+
+        :param sample_shape: Desired batch shape.
+        :returns: Sampled tensor of shape ``(*sample_shape, n_params)``.
         """
         n_samples = int(np.prod(sample_shape)) if sample_shape else 1
         d = self._mean_np.shape[0]
@@ -147,10 +170,13 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size(),
     ) -> torch.Tensor:
         """
-        Reparameterised sample (delegates to sample).
+        Reparameterised sample (delegates to :meth:`sample`).
 
-        Provided to satisfy the PyTorch Distribution interface expected by sbi.
-        Note: The Scipy sampling path is not strictly differentiable.
+        Provided to satisfy the PyTorch Distribution interface expected by
+        sbi. Note the SciPy sampling path is not strictly differentiable.
+
+        :param sample_shape: Desired batch shape.
+        :returns: Sampled tensor of shape ``(*sample_shape, n_params)``.
         """
         return self.sample(sample_shape)
 
@@ -163,6 +189,9 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         refreshing if you also want ``self.loc``/``self.scale_tril`` on the
         new device for anything that calls the parent ``MultivariateNormal``
         methods (e.g. ``log_prob``'s ``super().log_prob`` inside ``in_bounds``).
+
+        :param device: Target torch device.
+        :returns: This instance.
         """
         device = torch.device(device)
         self._lower_bounds = self._lower_bounds.to(device)

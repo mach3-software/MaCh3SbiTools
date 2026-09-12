@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import Simulator
-from mach3sbitools.utils import TorchDeviceHandler
+from mach3sbitools.utils import to_tensor
 
 from .parameter_context import apply_sliders_to_noms, build_parameter_context
 from .widget_factories import (
@@ -25,7 +25,6 @@ def build_fluctuation_view(
     *,
     simulator: Simulator,
     inference_handler: InferenceHandler,
-    device_handler: TorchDeviceHandler | None = None,
     base_noms: torch.Tensor | None = None,
 ) -> dict:
     """
@@ -45,8 +44,6 @@ def build_fluctuation_view(
     :param simulator: Configured :class:`~mach3sbitools.simulator.Simulator`.
     :param inference_handler: Trained
         :class:`~mach3sbitools.inference.InferenceHandler`.
-    :param device_handler: Device handler for tensor conversion. Defaults to
-        a fresh :class:`~mach3sbitools.utils.TorchDeviceHandler`.
     :param base_noms: Full-length nominal parameter vector passed to
         ``simulator.simulator_wrapper.simulate``. Slider values overwrite
         the entries selected by ``simulator.prior.nuisance_filter`` (i.e.
@@ -54,9 +51,8 @@ def build_fluctuation_view(
         at ``base_noms``. Defaults to the simulator's own nominal vector.
     :returns: Dict of the created widgets/state.
     """
-    device_handler = device_handler or TorchDeviceHandler()
     wrapper = simulator.simulator_wrapper
-    ctx = build_parameter_context(simulator, device_handler, base_noms=base_noms)
+    ctx = build_parameter_context(simulator, base_noms=base_noms)
     parameter_names = ctx.parameter_names
     n_params = len(parameter_names)
 
@@ -71,7 +67,13 @@ def build_fluctuation_view(
     results_cache: dict = {}
 
     def fluctuate(x_obs):
-        return device_handler.to_tensor([np.random.poisson(b) for b in x_obs])
+        """
+        Apply Poisson noise to an observation.
+
+        :param x_obs: Expected bin contents.
+        :returns: A Poisson-fluctuated toy observation.
+        """
+        return to_tensor([np.random.poisson(b) for b in x_obs])
 
     def _plot_param(
         i: int,
@@ -81,6 +83,16 @@ def build_fluctuation_view(
         fill: bool,
         show_minmax: bool,
     ) -> None:
+        """
+        Draw the toy-spread histogram for one parameter.
+
+        :param i: Parameter index.
+        :param posterior_samples: Samples of shape ``(n_toys, n_samples, n_params)``.
+        :param nominal_samps: Samples drawn at the nominal observation.
+        :param n_bins: Histogram bins.
+        :param fill: Fill the histograms rather than drawing outlines.
+        :param show_minmax: Shade the per-bin min/max envelope across toys.
+        """
         minmax_color = "#8f8882"
         n_toys = posterior_samples.shape[0]
 
@@ -148,6 +160,11 @@ def build_fluctuation_view(
         plt.close(fig)
 
     def redraw(_=None) -> None:
+        """
+        Re-render the cached results after a display-only control changes.
+
+        :param _: Widget change event, unused.
+        """
         if "posterior_samples" not in results_cache:
             return
         with out:
@@ -164,8 +181,13 @@ def build_fluctuation_view(
                 )
 
     def run_fluctuate(_=None) -> None:
+        """
+        Re-simulate, re-sample the posterior, and redraw.
+
+        :param _: Widget change event, unused.
+        """
         slider_values = [sliders[name].value for name in parameter_names]
-        noms = apply_sliders_to_noms(ctx, slider_values, device_handler)
+        noms = apply_sliders_to_noms(ctx, slider_values)
         obs_new = wrapper.simulate(noms.tolist())
 
         current_n_samples = samples_slider.value

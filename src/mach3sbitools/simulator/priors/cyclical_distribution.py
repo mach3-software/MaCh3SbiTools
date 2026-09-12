@@ -66,6 +66,8 @@ class CyclicalDistribution(torch.distributions.Distribution):
         Variance of the distribution.
 
         Computed analytically as :math:`\\int p(x)\\,x^2\\,dx` over ``[-2π, 2π]``.
+
+        :returns: Variance tensor of shape ``(1,)``.
         """
         return torch.Tensor([4 * (np.pi**2 - 6) / 3])
 
@@ -112,8 +114,8 @@ class CyclicalDistribution(torch.distributions.Distribution):
         pdf = self.pdf(value)
         in_bounds = pdf > 1e-8
         log_p = torch.full(pdf.shape, -np.inf, dtype=torch.double, device=self.device)
-        log_p[in_bounds] = -1 * torch.log(pdf[in_bounds])
-        return -log_p
+        log_p[in_bounds] = torch.log(pdf[in_bounds])
+        return log_p
 
     def _build_cdf_grid(
         self, n_points: int = 10_000
@@ -194,8 +196,29 @@ class CyclicalDistribution(torch.distributions.Distribution):
             else samples.reshape(*sample_shape, len(self.nominals))
         ).to(self.device)
 
+    def rsample(
+        self, sample_shape: torch.Size | list[int] | tuple[int, ...] = torch.Size()
+    ) -> torch.Tensor:
+        """
+        Reparameterised sample (delegates to :meth:`sample`).
+
+        Inverse-CDF sampling through a lookup table is not differentiable, so
+        this is not a true reparameterisation. It exists because
+        :meth:`~mach3sbitools.simulator.priors.prior.Prior.rsample` calls it
+        on every sub-distribution, and the base class would otherwise raise.
+
+        :param sample_shape: Desired batch shape.
+        :returns: Sampled tensor of shape ``(*sample_shape, event_size)``.
+        """
+        return self.sample(sample_shape)
+
     def to(self, device: torch.device | str) -> "CyclicalDistribution":
-        """Move cached tensors to *device* in-place."""
+        """
+        Move cached tensors to *device* in-place.
+
+        :param device: Target torch device.
+        :returns: This instance.
+        """
         self.device = torch.device(device)
         self.nominals = self.nominals.to(device)
         self.lower_bounds = self.lower_bounds.to(device)

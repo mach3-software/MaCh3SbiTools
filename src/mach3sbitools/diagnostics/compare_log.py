@@ -8,14 +8,21 @@ from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import Simulator
 
 
-def normalise_logl(input_arr: np.ndarray):
+def normalise_logl(input_arr: np.ndarray) -> np.ndarray:
+    """
+    Standardise log-likelihoods so two differently-scaled sets overlay.
+
+    :param input_arr: Raw log-likelihood values.
+    :returns: Zero-mean, unit-variance values, or zeros if the input is
+        constant.
+    """
     mean = np.mean(input_arr)
     std_dev = np.std(input_arr)
 
     if std_dev == 0:
-        return np.zeros_like(input_arr)  # ← simplest fix
+        return np.zeros_like(input_arr)
 
-    return (input_arr - mean) / std_dev
+    return np.asarray((input_arr - mean) / std_dev)
 
 
 def compare_logl(
@@ -25,13 +32,17 @@ def compare_logl(
     n_bins: int = 100,
     likelihood_range: tuple[float, float] | None = None,
     save_path: Path | None = None,
-):
-    """Compares the LLH of an actual model and the simulator
+) -> None:
+    """
+    Overlay the log-likelihood of posterior samples against the simulator's.
 
-    :param simulator: The simulator
-    :param inference_handler: The inference handler
-    :param n_samples: Number of samples to draw
-    :param save_path: Where to save, defaults to None
+    :param simulator: The simulator.
+    :param inference_handler: Handler holding the trained posterior.
+    :param n_samples: Number of samples to draw.
+    :param n_bins: Histogram bins in the comparison plot.
+    :param likelihood_range: ``(low, high)`` clip on the histogram range, or
+        ``None`` to use the full data range.
+    :param save_path: Where to save the figure. ``None`` skips saving.
     """
 
     simulator_samples = (

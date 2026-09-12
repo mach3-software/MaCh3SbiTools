@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 from pyarrow import Table
@@ -8,7 +9,7 @@ from tqdm.asyncio import tqdm
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import Simulator
-from mach3sbitools.utils import TorchDeviceHandler, get_logger
+from mach3sbitools.utils import get_device, get_logger, to_tensor
 
 
 def importance_sample_module(
@@ -23,12 +24,25 @@ def importance_sample_module(
     nuisance_pars: list[str],
     cyclical_pars: list[str],
     flipped_pars: list[str],
-):
+) -> None:
+    """
+    Reweight posterior samples against the simulator's true likelihood.
+
+    :param simulator_module: Dotted module path holding the simulator class.
+    :param simulator_class: Name of the simulator class within that module.
+    :param config: Path to the simulator's configuration file.
+    :param nuisance_pars: fnmatch patterns for parameters to exclude.
+    :param cyclical_pars: fnmatch patterns for parameters using a cyclical prior.
+    :param flipped_pars: fnmatch patterns for parameters that may flip sign.
+    :param output_file: Destination parquet path for the weighted samples.
+    :param n_samples: Number of samples to return.
+    :param oversampling_factor: Proposals drawn per returned sample.
+    :param max_sampling_batch: Largest proposal batch held in memory at once.
+    :param posterior: Path to a trained density estimator checkpoint.
+    """
     logger = get_logger()
     logger.info("Perform importance sampling")
 
-    device_handler = TorchDeviceHandler()
-    """Sample the posterior distribution conditioned on observed data."""
     simulator = Simulator(
         simulator_module,
         simulator_class,
@@ -38,9 +52,11 @@ def importance_sample_module(
         flipped_pars=flipped_pars,
     )
 
-    prior_path = Path("/tmp/prior.pkl")
-    simulator.prior.save(prior_path)
-    inference_handler = InferenceHandler(Path(prior_path))
+    with TemporaryDirectory() as tmp_dir:
+        prior_path = Path(tmp_dir) / "prior.pkl"
+        simulator.prior.save(prior_path)
+        inference_handler = InferenceHandler(prior_path)
+
     inference_handler.load_posterior(Path(posterior))
     inference_handler.build_posterior()
 
@@ -48,7 +64,14 @@ def importance_sample_module(
         raise RuntimeError("No posterior found")
 
     def log_prob_fn(theta, _):
-        return device_handler.to_tensor(
+        """
+        Evaluate the simulator's true log-likelihood for each proposal.
+
+        :param theta: Proposals of shape ``(n, n_params)``.
+        :param _: Observation argument required by sbi, unused here.
+        :returns: Log-likelihood tensor of shape ``(n,)``.
+        """
+        return to_tensor(
             np.array(
                 [
                     simulator.simulator_wrapper.get_log_likelihood(t)
@@ -59,7 +82,7 @@ def importance_sample_module(
 
     logger.info("Sampling...")
 
-    xo = device_handler.to_tensor(simulator.simulator_wrapper.get_data_bins())
+    xo = to_tensor(simulator.simulator_wrapper.get_data_bins())
 
     inference_handler.posterior.set_default_x(xo)
 
@@ -67,7 +90,7 @@ def importance_sample_module(
         potential_fn=log_prob_fn,
         proposal=inference_handler.posterior,
         method="sir",
-        device=device_handler.device,
+        device=get_device(),
     )
 
     theta_inferred = posterior_sir.sample(

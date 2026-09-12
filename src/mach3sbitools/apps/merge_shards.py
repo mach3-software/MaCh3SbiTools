@@ -11,35 +11,35 @@ conversion step needed.
 from pathlib import Path
 
 import numpy as np
-from tqdm.rich import tqdm
-from tqdm import TqdmExperimentalWarning
-import warnings
+from tqdm.auto import tqdm
 
 from mach3sbitools.utils import from_feather, get_logger, peek_num_rows
-
-warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
 # Set to np.float32 to downcast during merge and roughly halve output size
 # vs the source float64 feather data. Set to None to keep source dtype.
 FORCE_DTYPE = None
 
 
-def _truncate_npy(path: Path, new_n_rows: int, chunk_rows: int = 100_000):
+def _truncate_npy(path: Path, new_n_rows: int, chunk_rows: int = 100_000) -> None:
     """
     Rewrite a memmap-backed .npy file so it only contains its first
-    new_n_rows rows, dropping any trailing unused/uninitialized rows.
+    *new_n_rows* rows, dropping any trailing unused/uninitialized rows.
 
     We can't just slice the file in place because the .npy header (which
     encodes the shape) is padded/aligned to 64 bytes, and that padding can
     shift width depending on the digit count of the shape - so we rewrite
     via open_memmap with the correct shape and stream-copy the data across
     in chunks to avoid loading the whole array into memory.
+
+    :param path: The ``.npy`` file to truncate, in place.
+    :param new_n_rows: Number of leading rows to keep.
+    :param chunk_rows: Rows copied per iteration, bounding peak memory.
     """
     arr = np.load(path, mmap_mode="r")
     if new_n_rows == arr.shape[0]:
         return
 
-    new_shape = (new_n_rows,) + arr.shape[1:]
+    new_shape = (new_n_rows, *arr.shape[1:])
     tmp_path = path.with_suffix(".npy.tmp")
     new_arr = np.lib.format.open_memmap(
         tmp_path, mode="w+", dtype=arr.dtype, shape=new_shape
@@ -53,10 +53,15 @@ def _truncate_npy(path: Path, new_n_rows: int, chunk_rows: int = 100_000):
     tmp_path.replace(path)
 
 
-def merge_shards_module(simulation_dir: Path, output_dir: Path):
+def merge_shards_module(simulation_dir: Path, output_dir: Path) -> None:
     """
-    Merge a folder of feather shard files into memmap-backed theta.npy / x.npy
-    in output_dir.
+    Merge a folder of feather shards into memmap-backed ``theta.npy`` / ``x.npy``.
+
+    :param simulation_dir: Directory holding the ``*.feather`` shards.
+    :param output_dir: Directory the merged arrays are written to.
+    :raises FileExistsError: If either output file already exists.
+    :raises FileNotFoundError: If *simulation_dir* holds no feather files.
+    :raises ValueError: If a shard's width disagrees with the first shard's.
     """
     theta_path = output_dir / "theta.npy"
     x_path = output_dir / "x.npy"
@@ -107,22 +112,17 @@ def merge_shards_module(simulation_dir: Path, output_dir: Path):
     desc_str = f"Adding sims to {output_dir} | current file: "
 
     offset = 0
-    total_filtered = 0
 
     for shard in (pbar := tqdm(sims_files, desc=desc_str + str(sims_files[0]))):
         pbar.set_description(desc_str + str(shard))
 
         t, x = from_feather(shard)
 
-        before = len(t)
-
-        # HACK
-        # t_filter = np.where(t[:, -2] > 0)
-
-        # t = t[t_filter]
-        # x = x[t_filter]
-
-        # total_filtered += before - len(t)
+        if t.shape[1] != t_dim or x.shape[1] != x_dim:
+            raise ValueError(
+                f"{shard} has shape theta={t.shape[1]}, x={x.shape[1]}; "
+                f"expected theta={t_dim}, x={x_dim}"
+            )
 
         theta_out[offset : offset + len(t)] = t
         x_out[offset : offset + len(x)] = x
@@ -140,6 +140,4 @@ def merge_shards_module(simulation_dir: Path, output_dir: Path):
         _truncate_npy(theta_path, offset)
         _truncate_npy(x_path, offset)
 
-    get_logger().info(
-        "Finished merge. Filtered out %d/%d entries", total_filtered, n_rows
-    )
+    get_logger().info("Finished merge. Wrote %d rows to %s", offset, output_dir)

@@ -35,22 +35,36 @@ def test_protocol_followed(simulator_module, dummy_config):
         get_simulator(simulator_module, bad_sim_class, dummy_config)
 
 
-def test_importing(simulator_module):
+@pytest.mark.parametrize(
+    "module,cls",
+    [
+        pytest.param("ABadPythonSimulator", "NotAClass", id="missing-module"),
+        pytest.param("dummy_simulator", "NotAClass", id="missing-class"),
+    ],
+)
+def test_import_failures(module, cls):
     with pytest.raises(SimulatorImportError):
-        get_simulator("ABadPythonSimulator", "NotAClass", "")
-
-    with pytest.raises(SimulatorImportError):
-        get_simulator(simulator_module, "NotAClass", "")
+        get_simulator(module, cls, "")
 
 
-def test_hint(simulator_module, simulator_class):
-    # Check our hints are doing what we expect
+@pytest.mark.parametrize(
+    "mangle",
+    [
+        pytest.param(str.capitalize, id="wrong-case"),
+        pytest.param(lambda name: name[:-1] + "Z", id="typo-last-letter"),
+    ],
+)
+def test_hint_suggests_the_real_module(simulator_module, mangle):
     installed = [m.name for m in pkgutil.iter_modules()]
+    assert _hint(mangle(simulator_module), installed) == (
+        f" Did you mean: {simulator_module}?"
+    )
 
-    sim_copy = simulator_module.capitalize()
-    hint = _hint(sim_copy, installed)
-    assert hint == f" Did you mean: {simulator_module}?"
 
-    sim_copy = simulator_module[:-1] + "Z"
-    hint = _hint(sim_copy, installed)
-    assert hint == f" Did you mean: {simulator_module}?"
+def test_hint_is_empty_when_nothing_is_close(simulator_module):
+    assert _hint("zzzzzzzzzz", [simulator_module]) == ""
+
+
+def test_import_error_message_carries_the_hint(simulator_module):
+    with pytest.raises(SimulatorImportError, match="Did you mean"):
+        get_simulator(simulator_module.capitalize(), "DummySimulator", "")

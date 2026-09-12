@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import torch
 
 from mach3sbitools.simulator import Simulator
-from mach3sbitools.utils import TorchDeviceHandler
+from mach3sbitools.utils import to_tensor
 
 
 @dataclass
@@ -35,7 +35,6 @@ class ParameterContext:
 
 def build_parameter_context(
     simulator: Simulator,
-    device_handler: TorchDeviceHandler,
     base_noms: torch.Tensor | None = None,
 ) -> ParameterContext:
     """
@@ -47,7 +46,6 @@ def build_parameter_context(
     slider values back into the full-length vector the simulator expects.
 
     :param simulator: Configured :class:`~mach3sbitools.simulator.Simulator`.
-    :param device_handler: Device handler for tensor conversion.
     :param base_noms: Full-length nominal parameter vector passed to
         ``simulator.simulator_wrapper.simulate``. Nuisance (filtered-out)
         entries stay fixed at these values. Defaults to the simulator's own
@@ -59,7 +57,7 @@ def build_parameter_context(
     nuisance_filter = simulator.prior.nuisance_filter.cpu()
 
     if base_noms is None:
-        base_noms = device_handler.to_tensor(wrapper.get_parameter_nominals()).cpu()
+        base_noms = to_tensor(wrapper.get_parameter_nominals()).cpu()
 
     return ParameterContext(
         parameter_names=[str(p) for p in prior_data.parameter_names],
@@ -74,7 +72,6 @@ def build_parameter_context(
 def apply_sliders_to_noms(
     ctx: ParameterContext,
     slider_values: list[float],
-    device_handler: TorchDeviceHandler,
 ) -> torch.Tensor:
     """
     Overwrite the inferred (non-nuisance) entries of ``ctx.base_noms``.
@@ -82,10 +79,9 @@ def apply_sliders_to_noms(
     :param ctx: Resolved parameter context.
     :param slider_values: Slider values, ordered to match
         ``ctx.parameter_names``.
-    :param device_handler: Device handler for tensor conversion.
     :returns: Full-length parameter vector with inferred entries updated and
         nuisance entries left at their base values.
     """
     noms = ctx.base_noms.clone()
-    noms[ctx.nuisance_filter] = device_handler.to_tensor(slider_values).cpu()
+    noms[ctx.nuisance_filter] = to_tensor(slider_values).cpu()
     return noms

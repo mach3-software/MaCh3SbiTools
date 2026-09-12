@@ -2,6 +2,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from mach3sbitools.utils import get_logger
+
 
 @dataclass
 class Systematic:
@@ -26,6 +28,13 @@ class ProcessedSystematics:
     covariance: np.ndarray
 
     def __getitem__(self, mask):
+        """
+        Select a subset of parameters.
+
+        :param mask: Boolean or index mask over the parameter axis.
+        :returns: A new :class:`ProcessedSystematics` holding only those
+            parameters, with the covariance sliced on both axes.
+        """
         return ProcessedSystematics(
             names=self.names[mask],
             errors=self.errors[mask],
@@ -38,15 +47,25 @@ class ProcessedSystematics:
         )
 
     def __len__(self):
+        """
+        :returns: Number of parameters held.
+        """
         return len(self.names)
 
 
 def get_corrected_covariance(parameter_handler):
+    """
+    Read the prior covariance, overriding the known-bad ``delm2_12`` entry.
+
+    :param parameter_handler: MaCh3 parameter handler to read from.
+    :returns: The corrected covariance matrix.
+    """
     covariance = parameter_handler.get_prior_cov()
+    logger = get_logger()
     for i in range(parameter_handler.get_n_pars()):
         par_name = parameter_handler.get_fancy_par_name(i)
         if par_name == "delm2_12":
-            print(f"Correcting covariance for {par_name} to 0.0000018")
+            logger.info("Correcting covariance for %s to 0.0000018", par_name)
             covariance[i, i] = 0.0000018**2
     return covariance
 
@@ -54,8 +73,9 @@ def get_corrected_covariance(parameter_handler):
 def process_parameters(parameter_handler) -> ProcessedSystematics:
     """
     Process a list of MaCh3 parameter handler YAML files.
-    :param parameter_handler:
-    :return:
+
+    :param parameter_handler: MaCh3 parameter handler to read from.
+    :returns: The parameter properties, packed into a dataclass.
     """
     n_systs = parameter_handler.get_n_pars()
     idx = range(n_systs)

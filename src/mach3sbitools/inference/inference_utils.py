@@ -59,7 +59,7 @@ def select_model_kwargs(config: PosteriorConfig) -> dict:
         },
         # Zuko-backed flows — num_blocks is a MAF/MLP concept not accepted by zuko
         "zuko_maf": {"hidden_features", "num_transforms"},
-        "zuko_nsf": {"hidden_features", "num_bins"},
+        "zuko_nsf": {"hidden_features", "num_bins", "passes"},
         "zuko_bpf": {"hidden_features", "num_transforms", "num_bins"},
         "zuko_ncsf": {"hidden_features", "num_transforms", "num_bins"},
         "zuko_nice": {"hidden_features", "num_transforms"},
@@ -75,6 +75,7 @@ def select_model_kwargs(config: PosteriorConfig) -> dict:
         "dropout_probability": config.dropout_probability,
         "num_blocks": config.num_blocks,
         "num_bins": config.num_bins,
+        "passes": 4
     }
 
     accepted = model_factory.get(config.model.lower(), set(all_kwargs.keys()))

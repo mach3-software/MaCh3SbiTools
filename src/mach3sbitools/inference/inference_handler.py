@@ -278,7 +278,7 @@ class InferenceHandler:
             logger.warning(
                 "Requested model compilation. In testing this has been shown to be slower."
             )
-            torch.compile(lightning_module)
+            lightning_module = torch.compile(lightning_module)
 
         data_module = SBIDataModule(self.dataset, config)
         trainer = self._build_trainer(config)

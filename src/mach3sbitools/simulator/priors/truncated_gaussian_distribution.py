@@ -158,7 +158,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         # Recover x in original space: x = L z + mu
         x_np = (L @ z.T).T + mu
 
-        result = torch.from_numpy(x_np).to(dtype=self.loc.dtype, device=self.loc.device)
+        result = torch.from_numpy(x_np).to(dtype=self.loc.dtype, device=self.loc.device)  # type: ignore
 
         # Match torch.distributions batch shape convention
         if not sample_shape:
@@ -194,8 +194,8 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         :returns: This instance.
         """
         device = torch.device(device)
-        self._lower_bounds = self._lower_bounds.to(device)
-        self._upper_bounds = self._upper_bounds.to(device)
-        self.loc = self.loc.to(device)
-        self._unbroadcasted_scale_tril = self._unbroadcasted_scale_tril.to(device)
+        self._lower_bounds = self._lower_bounds.to(device)  # type: ignore
+        self._upper_bounds = self._upper_bounds.to(device)  # type: ignore
+        self.loc = self.loc.to(device)  # type: ignore
+        self._unbroadcasted_scale_tril = self._unbroadcasted_scale_tril.to(device)  # type: ignore
         return self

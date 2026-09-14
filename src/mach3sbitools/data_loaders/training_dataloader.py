@@ -97,7 +97,7 @@ class TrainingDataset(Dataset):
         """
         return self._len
 
-    def __getitem__(self, index: Index) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Fetch one row, a slice of rows, or an array of row indices.
 

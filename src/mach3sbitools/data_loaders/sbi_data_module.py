@@ -132,7 +132,7 @@ class SBIDataModule(L.LightningDataModule):
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=use_workers,
-            prefetch_factor=2 if use_workers else None,
+            prefetch_factor=10 if use_workers else None,
         )
 
     def train_dataloader(self) -> DataLoader:

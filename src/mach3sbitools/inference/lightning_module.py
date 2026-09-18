@@ -70,6 +70,7 @@ class SBILightningModule(L.LightningModule):
         """
         super().__init__()
         self.model = density_estimator
+        self.loss_fn = density_estimator.loss
         self.config = config
         self.model_config = model_config
         # Needed for scheduling

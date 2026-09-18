@@ -3,6 +3,7 @@
 import warnings
 from pathlib import Path
 
+import click
 import torch
 
 from mach3sbitools.inference import InferenceHandler
@@ -44,8 +45,8 @@ def train_module(
     prune_model: float | None,
     compress_x: bool,
     compress_theta: bool,
-    compress_x_components: int,
-    compress_theta_components: int,
+    compress_x_components: int | None,
+    compress_theta_components: int | None,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -73,6 +74,18 @@ def train_module(
             --max_epochs 50000 --stop_after_epochs 200
     """
     logger = get_logger()
+
+    # Checked before any expensive setup so a usage error surfaces immediately
+    # rather than after the prior and dataset have been opened. Skipped when
+    # resuming, where the architecture flags are read from the checkpoint and
+    # any passed here are ignored.
+    if not resume_checkpoint:
+        if compress_theta and compress_theta_components is None:
+            raise click.UsageError(
+                "--compress_theta requires --compress_theta_components N"
+            )
+        if compress_x and compress_x_components is None:
+            raise click.UsageError("--compress_x requires --compress_x_components N")
 
     save_file = Path(save_file)
     save_file.parent.mkdir(parents=True, exist_ok=True)

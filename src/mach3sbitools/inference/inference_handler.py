@@ -174,6 +174,9 @@ class InferenceHandler:
         if self._theta_compressor is None and self._x_compressor is None:
             return
 
+        if self.dataset.has_compressors:
+            return  # already attached; nothing to do and nothing to re-log
+
         self.dataset.set_compressors(self._theta_compressor, self._x_compressor)
 
         theta, x = self.dataset[:2]
@@ -233,6 +236,8 @@ class InferenceHandler:
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
 
+        # _fit applies compression too (it has to, for the resume path), but
+        # it must be attached before the estimator is sized from the dataset.
         self._apply_compression()
         density_estimator = self._build_density_estimator_from_inference()
         self._fit(density_estimator, config, model_config, ckpt_path=None)

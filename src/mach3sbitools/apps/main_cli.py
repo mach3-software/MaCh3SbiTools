@@ -460,8 +460,8 @@ def train(
     prune_model: float | None,
     compress_x: bool,
     compress_theta: bool,
-    compress_x_components: int,
-    compress_theta_components: int,
+    compress_x_components: int | None,
+    compress_theta_components: int | None,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 

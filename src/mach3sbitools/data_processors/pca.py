@@ -10,10 +10,20 @@ logger = get_logger()
 class PCACompressor(CompressorBase):
     def __init__(
         self,
-        n_components: int,
+        n_components: int | None,
         subsample: int = 2_000_000,
         niter: int = 4,
     ) -> None:
+        if n_components is None:
+            raise ValueError(
+                "PCACompressor requires n_components. Pass --compress_x_components "
+                "(or --compress_theta_components) alongside the --compress_* flag; "
+                "there is no safe default, since the choice controls how much "
+                "information the summary discards."
+            )
+        if n_components < 1:
+            raise ValueError(f"n_components must be >= 1, got {n_components}")
+
         self._n_components = n_components
         self.subsample = subsample
         self.niter = niter

@@ -32,7 +32,12 @@ from tqdm import TqdmExperimentalWarning
 from tqdm.rich import tqdm
 
 from mach3sbitools.simulator import load_prior
-from mach3sbitools.utils import get_logger
+from mach3sbitools.utils import (
+    CAN_DROP_CACHE,
+    advise_sequential,
+    drop_from_cache,
+    get_logger,
+)
 
 from .merge_shards import METADATA_FILENAME
 
@@ -43,40 +48,6 @@ DEFAULT_CHUNK_ROWS = 262_144
 
 #: Rows spot-checked against the source after the rewrite.
 _VERIFY_ROWS = 16
-
-
-def _advise_sequential(fd: int) -> None:
-    """Hint that this file is read front-to-back, so the kernel reads ahead."""
-    fadvise = getattr(os, "posix_fadvise", None)
-    flag = getattr(os, "POSIX_FADV_SEQUENTIAL", None)
-    if fadvise is None or flag is None:
-        return
-    try:
-        fadvise(fd, 0, 0, flag)
-    except OSError:
-        pass
-
-
-def _drop_from_cache(fd: int, offset: int, length: int) -> None:
-    """
-    Tell the kernel we are finished with a byte range.
-
-    Neither file is re-read, so every page either side of this copy is dead
-    the moment it has been used -- but the kernel does not know that and will
-    happily fill memory with all ~130 GB of it. Under a cgroup memory limit
-    (which is what SLURM gives a job) page cache counts against the limit, so
-    a long streaming copy can be OOM-killed despite the process itself using
-    only a few hundred MB. Dropping each range as we pass it keeps the
-    footprint flat. No-op where posix_fadvise is unavailable (e.g. macOS).
-    """
-    fadvise = getattr(os, "posix_fadvise", None)
-    flag = getattr(os, "POSIX_FADV_DONTNEED", None)
-    if fadvise is None or flag is None:
-        return
-    try:
-        fadvise(fd, offset, length, flag)
-    except OSError:
-        pass
 
 
 def _memory_snapshot() -> str:
@@ -111,7 +82,7 @@ def _memory_snapshot() -> str:
 
 
 #: True when we can actually manage the page cache; see _drop_from_cache.
-_CAN_DROP_CACHE = hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED")
+_CAN_DROP_CACHE = CAN_DROP_CACHE
 
 
 def _verify(source: np.ndarray, dest_path: Path, keep: np.ndarray, rng) -> None:
@@ -272,7 +243,7 @@ def strip_theta_module(
     bytes_read = 0
 
     with open(theta_path, "rb") as f_src, open(dest_path, "r+b") as f_dst:
-        _advise_sequential(f_src.fileno())
+        advise_sequential(f_src.fileno())
         f_src.seek(src_offset)
         f_dst.seek(dst_offset)
 
@@ -299,14 +270,14 @@ def strip_theta_module(
 
             if _CAN_DROP_CACHE:
                 # Source pages are spent as soon as they are copied.
-                _drop_from_cache(f_src.fileno(), src_pos, want)
+                drop_from_cache(f_src.fileno(), src_pos, want)
                 # Written pages can only be dropped once they are clean, so
                 # force this chunk out before discarding it. This also bounds
                 # dirty memory, which is the part the kernel cannot reclaim
                 # under pressure.
                 f_dst.flush()
                 os.fsync(f_dst.fileno())
-                _drop_from_cache(f_dst.fileno(), dst_pos, out_bytes)
+                drop_from_cache(f_dst.fileno(), dst_pos, out_bytes)
 
             src_pos += want
             dst_pos += out_bytes

@@ -8,7 +8,13 @@ from torch.utils.data import Dataset
 
 from mach3sbitools.data_processors import CompressorBase
 from mach3sbitools.simulator import Prior
-from mach3sbitools.utils import get_logger
+from mach3sbitools.utils import (
+    CAN_DROP_CACHE,
+    advise_sequential,
+    cgroup_memory_limit,
+    drop_from_cache,
+    get_logger,
+)
 
 #: Written by mach3sbitools.apps.merge_shards. Kept as a literal rather than
 #: imported to avoid data_loaders -> apps coupling.
@@ -51,6 +57,7 @@ class TrainingDataset(Dataset):
         self._theta_fd: int | None = None
         self._x_fd: int | None = None
         self._fd_pid: int | None = None
+        self._drop_cache = self._should_drop_cache()
         self._theta_buf: np.ndarray | None = None
         self._x_buf: np.ndarray | None = None
 
@@ -158,6 +165,46 @@ class TrainingDataset(Dataset):
         del mm
         return meta
 
+    def _should_drop_cache(self) -> bool:
+        """
+        Decide whether to discard page cache as we read.
+
+        Caching only pays off if the data can actually stay resident between
+        epochs. When the files dwarf the job's memory limit they cannot, and
+        leaving the cache to fill just drives the kernel into continuous
+        reclaim -- the pathology where mapped/cached memory climbs to the
+        cgroup ceiling, collapses, and climbs again while throughput craters.
+        In that regime dropping each range after use keeps the footprint flat
+        and costs nothing, because those pages were never going to be reused.
+
+        Set ``MACH3SBI_DROP_PAGE_CACHE`` to 0 or 1 to override.
+        """
+        override = os.environ.get("MACH3SBI_DROP_PAGE_CACHE")
+        if override is not None:
+            return override.strip() not in ("0", "false", "False", "")
+
+        if not CAN_DROP_CACHE:
+            return False
+
+        limit = cgroup_memory_limit()
+        if limit is None:
+            return False  # no limit to blow; let the kernel cache freely
+
+        total = sum(
+            m["shape"][0] * m["row_bytes"] for m in (self._theta_meta, self._x_meta)
+        )
+        # Half the limit, since the cache competes with the prefetch queue,
+        # pinned buffers and the process itself.
+        drop = bool(total > 0.5 * limit)
+        if drop:
+            get_logger().info(
+                "Dataset is %.0f GB against a %.0f GB cgroup limit; dropping page "
+                "cache behind reads to avoid reclaim thrashing",
+                total / 1e9,
+                limit / 1e9,
+            )
+        return drop
+
     def _ensure_open(self) -> None:
         """
         Open both files in this process, reopening after a fork.
@@ -173,6 +220,9 @@ class TrainingDataset(Dataset):
         self._theta_fd = os.open(self.theta_path, os.O_RDONLY)
         self._x_fd = os.open(self.x_path, os.O_RDONLY)
         self._fd_pid = pid
+
+        advise_sequential(self._theta_fd)
+        advise_sequential(self._x_fd)
 
     @staticmethod
     def _contiguous_runs(idx: np.ndarray, row_bytes: int) -> list[tuple[int, int]]:
@@ -225,7 +275,10 @@ class TrainingDataset(Dataset):
         for start, n in runs:
             nbytes = n * row_bytes
             target = raw[filled * row_bytes : filled * row_bytes + nbytes]
-            self._pread_into(fd, target, meta["offset"] + start * row_bytes)
+            file_offset = meta["offset"] + start * row_bytes
+            self._pread_into(fd, target, file_offset)
+            if self._drop_cache:
+                drop_from_cache(fd, file_offset, nbytes)
             rows_of.append(np.arange(start, start + n))
             filled += n
 

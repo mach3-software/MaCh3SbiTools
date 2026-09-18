@@ -16,6 +16,7 @@ from .merge_shards import merge_shards_module
 from .save_data import save_data_module
 from .save_prior import save_prior_module
 from .simulate import simulate_module
+from .strip_theta import strip_theta_module
 from .train import train_module
 
 
@@ -348,6 +349,16 @@ def save_data(
     help="Number of DataLoader worker processes.",
 )
 @optgroup.option(
+    "--prefetch_factor",
+    default=4,
+    type=int,
+    show_default=True,
+    help=(
+        "Batches each worker stages ahead. Host RAM is roughly "
+        "num_workers x prefetch_factor x batch_size x row_bytes, all pinned."
+    ),
+)
+@optgroup.option(
     "--use_amp",
     is_flag=True,
     default=False,
@@ -437,6 +448,7 @@ def train(
     stop_after_epochs: int,
     validation_fraction: float,
     num_workers: int,
+    prefetch_factor: int,
     autosave_every: int,
     resume_checkpoint: Path | None,
     use_amp: bool,
@@ -486,6 +498,7 @@ def train(
         stop_after_epochs,
         validation_fraction,
         num_workers,
+        prefetch_factor,
         autosave_every,
         resume_checkpoint,
         use_amp,
@@ -719,5 +732,108 @@ def diagnostics(
 @cli.command(short_help="Merge feather files")
 @click.option("--simulation_dir", "-s")
 @click.option("--output_file", "-o")
-def merge_shards(simulation_dir: Path, output_file: Path):
-    merge_shards_module(Path(simulation_dir), Path(output_file))
+@click.option(
+    "--prior_path",
+    "-r",
+    type=click.Path(exists=True),
+    default=None,
+    help=(
+        "Drop theta columns excluded by this prior's nuisance filter. "
+        "Masking at read time saves no I/O (row-major pages pull whole rows), "
+        "so this is the only way to stop paying to read unused parameters. "
+        "Bakes the nuisance choice into the output -- changing it means re-merging."
+    ),
+)
+@click.option(
+    "--shuffle",
+    is_flag=True,
+    default=False,
+    help=(
+        "Randomise shard order and permute rows within a sliding window. "
+        "Training reads sequentially and splits train/val contiguously, so "
+        "without this the validation set is just the tail of the shard order."
+    ),
+)
+@click.option(
+    "--shuffle_buffer_rows",
+    type=int,
+    default=5_000_000,
+    show_default=True,
+    help="Shuffle window size in rows. Costs ~rows x (x_dim + theta_dim) x 4 bytes of RAM.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=42,
+    show_default=True,
+    help="Seed for shard ordering and window permutation.",
+)
+def merge_shards(
+    simulation_dir: Path,
+    output_file: Path,
+    prior_path: Path | None,
+    shuffle: bool,
+    shuffle_buffer_rows: int,
+    seed: int,
+):
+    merge_shards_module(
+        Path(simulation_dir),
+        Path(output_file),
+        prior_path=Path(prior_path) if prior_path else None,
+        shuffle=shuffle,
+        shuffle_buffer_rows=shuffle_buffer_rows,
+        seed=seed,
+    )
+
+
+@cli.command(short_help="Drop nuisance theta columns from merged .npy data")
+@click.option(
+    "--data_dir",
+    "-d",
+    required=True,
+    type=click.Path(exists=True),
+    help="Directory containing the merged theta.npy and x.npy.",
+)
+@click.option(
+    "--prior_path",
+    "-r",
+    required=True,
+    type=click.Path(exists=True),
+    help="Prior whose nuisance filter selects the columns to keep.",
+)
+@click.option(
+    "--output_dir",
+    "-o",
+    default=None,
+    help="Destination for the narrowed theta.npy (x.npy is symlinked, not copied).",
+)
+@click.option(
+    "--in_place",
+    is_flag=True,
+    default=False,
+    help=(
+        "Replace theta.npy in data_dir via a temp file and atomic rename. "
+        "Destroys the unfiltered theta -- recovering it means re-merging."
+    ),
+)
+@click.option(
+    "--chunk_rows",
+    type=int,
+    default=500_000,
+    show_default=True,
+    help="Rows per streamed chunk.",
+)
+def strip_theta(
+    data_dir: Path,
+    prior_path: Path,
+    output_dir: Path | None,
+    in_place: bool,
+    chunk_rows: int,
+):
+    strip_theta_module(
+        Path(data_dir),
+        Path(prior_path),
+        output_dir=Path(output_dir) if output_dir else None,
+        in_place=in_place,
+        chunk_rows=chunk_rows,
+    )

@@ -1,6 +1,5 @@
 """Train application module."""
 
-import os
 import warnings
 from pathlib import Path
 
@@ -33,6 +32,7 @@ def train_module(
     stop_after_epochs: int,
     validation_fraction: float,
     num_workers: int,
+    prefetch_factor: int,
     autosave_every: int,
     resume_checkpoint: Path | None,
     use_amp: bool,
@@ -85,6 +85,7 @@ def train_module(
         stop_after_epochs=stop_after_epochs,
         validation_fraction=validation_fraction,
         num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
         autosave_every=autosave_every,
         resume_checkpoint=Path(resume_checkpoint) if resume_checkpoint else None,
         use_amp=use_amp,

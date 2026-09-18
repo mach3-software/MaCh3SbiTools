@@ -1,0 +1,223 @@
+"""
+Strip nuisance columns out of an already-merged theta.npy.
+
+Does the same thing ``merge_shards --prior_path`` does, but against merged
+output rather than the original feather shards -- so you don't pay to re-read
+the whole shard set just to drop columns.
+
+Because .npy is row-major and a 4 KiB page spans several complete rows,
+masking theta at read time saves no I/O at all: the discarded columns are
+faulted in regardless. Narrowing the file on disk is the only way to stop
+paying for them, on every epoch of every subsequent run.
+
+x.npy is not touched -- it has no nuisance columns. In the default
+(non-in-place) mode it is symlinked into the output directory rather than
+copied, so this costs roughly ``n_rows x n_kept x 4`` bytes of new disk and
+nothing more.
+
+Both the read and the write are sequential, so expect this to run at
+whatever streaming bandwidth the underlying storage gives you.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import warnings
+from pathlib import Path
+
+import numpy as np
+from tqdm import TqdmExperimentalWarning
+from tqdm.rich import tqdm
+
+from mach3sbitools.simulator import load_prior
+from mach3sbitools.utils import get_logger
+
+from .merge_shards import METADATA_FILENAME
+
+warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
+
+#: Rows per streamed chunk. At 299 float32 columns this is ~600 MB per read.
+DEFAULT_CHUNK_ROWS = 500_000
+
+#: Rows spot-checked against the source after the rewrite.
+_VERIFY_ROWS = 16
+
+
+def _verify(source: np.ndarray, dest_path: Path, keep: np.ndarray, rng) -> None:
+    """Spot-check that randomly chosen output rows match the masked source."""
+    dest = np.load(dest_path, mmap_mode="r")
+    n = min(_VERIFY_ROWS, len(source))
+    idx = rng.choice(len(source), size=n, replace=False)
+
+    for i in idx:
+        if not np.array_equal(dest[i], source[i][keep]):
+            raise RuntimeError(
+                f"Verification failed at row {i}: {dest_path} does not match "
+                f"the masked source. Output left in place for inspection."
+            )
+
+    del dest
+    get_logger().info(f"Verified {n} randomly chosen rows against the source")
+
+
+def strip_theta_module(
+    data_dir: Path,
+    prior_path: Path,
+    output_dir: Path | None = None,
+    in_place: bool = False,
+    chunk_rows: int = DEFAULT_CHUNK_ROWS,
+    seed: int = 42,
+):
+    """
+    Rewrite ``data_dir/theta.npy`` keeping only the columns this prior's
+    nuisance filter selects.
+
+    :param data_dir: Directory holding ``theta.npy`` and ``x.npy``.
+    :param prior_path: Prior whose nuisance filter selects the kept columns.
+    :param output_dir: Destination directory. Gets the narrowed ``theta.npy``,
+        a symlink to the original ``x.npy``, and a metadata sidecar. Ignored
+        when *in_place* is set.
+    :param in_place: Replace ``data_dir/theta.npy`` instead, via a temporary
+        file and an atomic rename. Destroys the unfiltered theta -- you would
+        have to re-merge from the shards to get it back.
+    :param chunk_rows: Rows per streamed chunk.
+    :param seed: Seed for choosing verification rows.
+    """
+    logger = get_logger()
+
+    data_dir = Path(data_dir)
+    theta_path = data_dir / "theta.npy"
+    x_path = data_dir / "x.npy"
+
+    if not theta_path.is_file():
+        raise FileNotFoundError(f"Cannot find {theta_path}")
+    if not x_path.is_file():
+        raise FileNotFoundError(f"Cannot find {x_path}")
+
+    if not in_place:
+        if output_dir is None:
+            raise ValueError("Provide --output_dir, or pass --in_place.")
+        output_dir = Path(output_dir)
+        if output_dir.resolve() == data_dir.resolve():
+            raise ValueError(
+                "output_dir is the same as data_dir; use --in_place if that's "
+                "what you meant."
+            )
+
+    # ── Work out the keep-mask ────────────────────────────────────────────
+    prior = load_prior(prior_path)
+    keep = prior.nuisance_filter.cpu().numpy().astype(bool)
+    kept_names = list(prior.prior_data.parameter_names)
+
+    theta = np.load(theta_path, mmap_mode="r")
+    n_rows, n_cols = theta.shape
+    n_keep = int(keep.sum())
+
+    if n_cols == n_keep and len(keep) != n_cols:
+        logger.info(
+            f"{theta_path} already has {n_cols} columns, matching this prior's "
+            f"filter. Nothing to do."
+        )
+        return
+
+    if len(keep) != n_cols:
+        raise ValueError(
+            f"Prior nuisance filter covers {len(keep)} parameters but "
+            f"{theta_path} has {n_cols} columns. Wrong prior for this data?"
+        )
+
+    if n_keep == n_cols:
+        logger.info("Prior keeps every theta column -- nothing to strip.")
+        return
+
+    old_gb = theta.nbytes / 1e9
+    new_gb = n_rows * n_keep * 4 / 1e9
+    x_gb = np.load(x_path, mmap_mode="r").nbytes / 1e9
+    logger.info(
+        "Stripping theta: [bold]%d[/] -> [bold]%d[/] columns (%.1f GB -> %.1f GB)",
+        n_cols,
+        n_keep,
+        old_gb,
+        new_gb,
+    )
+    logger.info(
+        "Per-epoch bytes: %.1f GB -> %.1f GB (%.0f%% of current)",
+        x_gb + old_gb,
+        x_gb + new_gb,
+        100.0 * (x_gb + new_gb) / (x_gb + old_gb),
+    )
+
+    # ── Stream the rewrite ────────────────────────────────────────────────
+    if in_place:
+        dest_path = theta_path.with_suffix(".npy.tmp")
+    else:
+        assert output_dir is not None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = output_dir / "theta.npy"
+        if dest_path.exists():
+            raise FileExistsError(
+                f"{dest_path} already exists please rename or use another output dir"
+            )
+
+    out = np.lib.format.open_memmap(
+        dest_path, mode="w+", dtype=theta.dtype, shape=(n_rows, n_keep)
+    )
+
+    for start in tqdm(
+        range(0, n_rows, chunk_rows),
+        desc=f"Stripping {theta_path.name}",
+    ):
+        end = min(start + chunk_rows, n_rows)
+        out[start:end] = theta[start:end][:, keep]
+
+    out.flush()
+    del out
+
+    _verify(theta, dest_path, keep, np.random.default_rng(seed))
+    del theta  # release the source mmap before any rename
+
+    if in_place:
+        dest_path.replace(theta_path)
+        final_theta = theta_path
+        final_dir = data_dir
+        logger.info(f"Replaced [cyan]{theta_path}[/] in place")
+    else:
+        assert output_dir is not None
+        final_theta = dest_path
+        final_dir = output_dir
+        link = output_dir / "x.npy"
+        if not link.exists():
+            try:
+                os.symlink(x_path.resolve(), link)
+                logger.info(f"Symlinked [cyan]{link}[/] -> {x_path.resolve()}")
+            except OSError as exc:
+                logger.warning(
+                    f"Could not symlink x.npy ({exc}); point training at "
+                    f"{x_path} yourself, or copy it in."
+                )
+
+    # ── Sidecar ───────────────────────────────────────────────────────────
+    metadata_path = final_dir / METADATA_FILENAME
+    metadata = {}
+    source_metadata = data_dir / METADATA_FILENAME
+    if source_metadata.is_file():
+        try:
+            metadata = json.loads(source_metadata.read_text())
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+
+    metadata.update(
+        {
+            "n_rows": int(n_rows),
+            "theta_dim": int(n_keep),
+            "theta_filtered": True,
+            "n_theta_params_full": int(n_cols),
+            "kept_parameter_names": kept_names,
+            "prior_path": str(prior_path),
+            "stripped_from": str(theta_path),
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata, indent=2))
+    logger.info(f"Wrote merge metadata to [cyan]{metadata_path}[/]")
+    logger.info(f"Done. Train against [cyan]{final_theta.parent}[/]")

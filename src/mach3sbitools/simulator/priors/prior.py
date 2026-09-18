@@ -43,9 +43,6 @@ class PriorNotFound(Exception):
 logger = get_logger()
 
 
-from torch.distributions import Uniform, constraints
-
-
 @dataclass(frozen=True)
 class MaskDistributionMap:
     """
@@ -67,7 +64,6 @@ class MaskDistributionMap:
         """
         dist = self.distribution
 
-
         if hasattr(dist, "to") and callable(getattr(dist, "to")):
             dist = dist.to(device)
         elif isinstance(dist, Uniform):
@@ -79,7 +75,7 @@ class MaskDistributionMap:
                 f"Add a .to() method or handle it explicitly here."
             )
 
-        return MaskDistributionMap(mask=self.mask.to(device), distribution=dist)    
+        return MaskDistributionMap(mask=self.mask.to(device), distribution=dist)
 
 
 class Prior(torch.distributions.Distribution):
@@ -388,7 +384,6 @@ class Prior(torch.distributions.Distribution):
             device=self.device_handler.device,
         )
 
-
         for mask_map in self._priors:
             samples[..., mask_map.mask] = mask_map.distribution.sample(sample_shape).to(
                 torch.double
@@ -459,7 +454,7 @@ class Prior(torch.distributions.Distribution):
         :param device: Target PyTorch device.
         :returns: ``self``, for chaining.
         """
-        self.device_handler = TorchDeviceHandler()        
+        self.device_handler = TorchDeviceHandler()
         self._prior_data = self._prior_data.to(device)
         for i, mask_map in enumerate(self._priors):
             self._priors[i] = mask_map.to(device)
@@ -467,7 +462,8 @@ class Prior(torch.distributions.Distribution):
         self._flipped_mask = self._flipped_mask.to(device)
 
         return self
-    
+
+
 # ── Module-level helpers ───────────────────────────────────────────────────────
 def _check_boundary(
     nominal: torch.Tensor,

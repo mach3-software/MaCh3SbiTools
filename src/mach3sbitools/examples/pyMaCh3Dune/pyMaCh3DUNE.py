@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
-from yaml import safe_load
-
-from .helpers import process_parameters
+from pyMaCh3_DUNE import parameters, samples
 
 # NOTE: assuming `Manager` is exposed from the core pyMaCh3 module as
 # `pyMaCh3.manager.Manager` (not from pyMaCh3_DUNE). Adjust this import
 # to match wherever your core bindings actually expose it.
 from pyMaCh3_DUNE._pyMaCh3.manager import Manager
-from pyMaCh3_DUNE import parameters, samples
-
-HAS_PYMACH3 = True
+from yaml import safe_load
 
 from mach3sbitools.utils.logger import get_logger
+
+from .helpers import process_parameters
+
+HAS_PYMACH3 = True
 
 logger = get_logger()
 

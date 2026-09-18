@@ -75,7 +75,7 @@ def select_model_kwargs(config: PosteriorConfig) -> dict:
         "dropout_probability": config.dropout_probability,
         "num_blocks": config.num_blocks,
         "num_bins": config.num_bins,
-        "passes": 4
+        "passes": 4,
     }
 
     accepted = model_factory.get(config.model.lower(), set(all_kwargs.keys()))

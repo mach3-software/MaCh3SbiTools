@@ -7,12 +7,14 @@ import time
 import lightning as L
 import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.distributed._composable.fsdp import fully_shard
-
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+)
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.utils import get_logger, PosteriorConfig, TrainingConfig
+from mach3sbitools.utils import PosteriorConfig, TrainingConfig, get_logger
 
 logger = get_logger()
 
@@ -88,6 +90,9 @@ class SBILightningModule(L.LightningModule):
         self._epoch_start_time: float = 0.0
         self._train_samples_seen: int = 0
 
+        # Reset each epoch; see on_before_optimizer_step.
+        self._grad_norms_logged_this_epoch: bool = False
+
         self._x_compressor = x_compressor
         self._theta_compressor = theta_compressor
 
@@ -122,6 +127,7 @@ class SBILightningModule(L.LightningModule):
         """Record epoch start time and reset sample counter."""
         self._epoch_start_time = time.perf_counter()
         self._train_samples_seen = 0
+        self._grad_norms_logged_this_epoch = False
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """
@@ -132,25 +138,30 @@ class SBILightningModule(L.LightningModule):
         :returns: Scalar mean loss.
         """
         theta, x = batch
-        loss_per_sample = self.model.loss(theta, x)
+        # loss_fn, not model.loss: _fit() may have replaced it with a
+        # torch.compile'd version, which model.loss would bypass.
+        loss_per_sample = self.loss_fn(theta, x)
         loss = loss_per_sample.mean()
 
         self._train_samples_seen += theta.shape[0]
 
+        # sync_dist on a per-step log is a collective on every step. The
+        # epoch-level aggregate below is reduced once instead; the per-step
+        # trace stays rank-local, which is all it is used for.
         self.log(
             "train/loss",
             loss,
             on_step=True,
             on_epoch=True,
             prog_bar=True,
-            sync_dist=True,
+            sync_dist=False,
         )
         self.log(
             "train/loss_std",
             loss_per_sample.std(),
             on_step=True,
             on_epoch=False,
-            sync_dist=True,
+            sync_dist=False,
         )
         return loss
 
@@ -202,11 +213,19 @@ class SBILightningModule(L.LightningModule):
             self.log("train/param_norm", total_param_norm_sq**0.5, sync_dist=False)
 
     def on_before_optimizer_step(self, optimizer) -> None:
+        # Every .item() below is a blocking GPU->CPU sync, and there is one
+        # per parameter tensor. Running that on every step drains the
+        # pipeline hundreds of times per step and dominates wall time once
+        # the batch size is small enough to give a high step count -- so
+        # sample it once per epoch rather than once per step.
         if (
             self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0
+            or self._grad_norms_logged_this_epoch
             or not self.trainer.is_global_zero
         ):
             return
+
+        self._grad_norms_logged_this_epoch = True
 
         total_grad_norm_sq = 0.0
         for name, p in self.model.named_parameters():
@@ -219,8 +238,6 @@ class SBILightningModule(L.LightningModule):
 
         self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
 
-
-
     # ── Validation ────────────────────────────────────────────────────────────
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
@@ -232,7 +249,7 @@ class SBILightningModule(L.LightningModule):
         :returns: Scalar mean loss.
         """
         theta, x = batch
-        loss_per_sample = self.model.loss(theta, x)
+        loss_per_sample = self.loss_fn(theta, x)
         loss = loss_per_sample.mean()
 
         self.log(

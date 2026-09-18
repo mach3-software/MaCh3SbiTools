@@ -36,7 +36,8 @@ import warnings
 
 import lightning as L
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data._utils.collate import default_collate
 
 from mach3sbitools.utils.config import TrainingConfig
 
@@ -50,6 +51,22 @@ warnings.filterwarnings(
     message=".*LeafSpec.*deprecated.*",
     category=UserWarning,
 )
+
+
+def _collate_batched(batch):
+    """
+    Pass through batches that the dataset already collated.
+
+    ``TrainingDataset.__getitems__`` returns ``(theta, x)`` as stacked
+    tensors, so there is nothing left to do. Falling back to
+    ``default_collate`` keeps this working for any dataset that yields plain
+    per-row samples instead (e.g. a ``TensorDataset``).
+
+    Defined at module scope so it survives pickling to spawned workers.
+    """
+    if isinstance(batch, tuple) and len(batch) == 2 and torch.is_tensor(batch[0]):
+        return batch
+    return default_collate(batch)
 
 
 class SBIDataModule(L.LightningDataModule):
@@ -132,7 +149,11 @@ class SBIDataModule(L.LightningDataModule):
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=use_workers,
-            prefetch_factor=10 if use_workers else None,
+            # Staged bytes are num_workers x prefetch_factor x batch_size x
+            # row_bytes, all of it pinned. Large values here are a common
+            # cause of host OOM at big batch sizes.
+            prefetch_factor=self.config.prefetch_factor if use_workers else None,
+            collate_fn=_collate_batched,
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -149,6 +170,4 @@ class SBIDataModule(L.LightningDataModule):
         """
         if self.val_dataset is None:
             raise RuntimeError("Validation set has not been set; call setup() first.")
-        return self._make_dataloader(
-            self.val_dataset, shuffle=False
-        )
+        return self._make_dataloader(self.val_dataset, shuffle=False)

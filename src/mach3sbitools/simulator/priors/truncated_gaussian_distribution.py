@@ -16,6 +16,13 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     tails (inverse-Jacobian issues) and preserving the true covariance matrix.
     """
 
+    # Both are set by MultivariateNormal.__init__, but ``to()`` reassigns them
+    # from their own current value. Without a declaration a type checker has
+    # only that self-referential assignment to work from and cannot resolve
+    # the type. Bare annotations, so no class attribute is created at runtime.
+    loc: torch.Tensor
+    _unbroadcasted_scale_tril: torch.Tensor
+
     def __init__(
         self,
         mean: torch.Tensor,

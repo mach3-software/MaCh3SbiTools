@@ -11,7 +11,6 @@ import lightning
 
 # Non-builtin but standard
 import numpy as np
-from tqdm.auto import tqdm
 
 # Torch
 import torch
@@ -31,7 +30,7 @@ from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParamet
 from sbi.neural_nets import posterior_nn
 from sbi.samplers.rejection import rejection
 from sbi.utils.user_input_checks import process_x
-from torch.utils.data import TensorDataset
+from tqdm.auto import tqdm
 
 from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
 from mach3sbitools.data_processors import (
@@ -94,7 +93,7 @@ class InferenceHandler:
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
-        
+
         # Compression for X/Theta
         self._theta_compressor: CompressorBase | None = None
         self._x_compressor: CompressorBase | None = None
@@ -105,17 +104,16 @@ class InferenceHandler:
 
         :param data_folder: Directory containing ``.feather`` files.
         """
-        
-        x_data = data_folder/'x.npy'
-        theta_data = data_folder/'theta.npy'
-        
+
+        x_data = data_folder / "x.npy"
+        theta_data = data_folder / "theta.npy"
+
         if not x_data.is_file():
             raise FileNotFoundError(f"Cannot find x data file: {x_data}")
 
         if not theta_data.is_file():
             raise FileNotFoundError(f"Cannot find theta data file: {theta_data}")
 
-        
         self.dataset = TrainingDataset(theta_data, x_data, self.prior)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
@@ -269,10 +267,9 @@ class InferenceHandler:
             lightning_module.loss_fn = torch.compile(
                 lightning_module.model.loss, dynamic=False
             )
-            
+
         data_module = SBIDataModule(self.dataset, config)
         trainer = self._build_trainer(config)
-
 
         trainer.fit(lightning_module, datamodule=data_module, ckpt_path=ckpt_path)
 
@@ -330,7 +327,7 @@ class InferenceHandler:
             raise ValueError("Train or load a density estimator first.")
 
         x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
-                
+
         if self._x_compressor is not None:
             x_tensor = self._x_compressor.transform(x_tensor).to(
                 self.device_handler.device
@@ -362,7 +359,7 @@ class InferenceHandler:
         #     torch.Tensor,
         #     self.posterior.sample((num_samples,), x=x_tensor, **kwargs),
         # )
-        
+
         samples_compressed = rejection.accept_reject_sample(
             proposal=self.posterior.posterior_estimator.sample,
             accept_reject_fn=lambda theta: strict_prior_mask(theta),
@@ -491,7 +488,7 @@ class InferenceHandler:
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:
         """Construct a Lightning Trainer from *config*."""
-        acc, strat = select_accelerator_and_strategy(use_model_parallel=False)
+        acc, _strat = select_accelerator_and_strategy(use_model_parallel=False)
         tb_logger = (
             TensorBoardLogger(save_dir=str(config.tensorboard_dir))
             if config.tensorboard_dir
@@ -509,7 +506,7 @@ class InferenceHandler:
             accelerator=acc,
             devices="auto",
             num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
-            num_sanity_val_steps=0
+            num_sanity_val_steps=0,
         )
 
     def sample_posterior_chunked(

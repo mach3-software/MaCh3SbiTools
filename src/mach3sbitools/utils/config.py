@@ -22,6 +22,9 @@ class TrainingConfig:
         :class:`~torch.optim.lr_scheduler.ReduceLROnPlateau` halves the LR.
     :param validation_fraction: Fraction of data held out for validation.
     :param num_workers: Number of DataLoader worker processes.
+    :param prefetch_factor: Batches each worker stages ahead. Host RAM used
+        is roughly ``num_workers x prefetch_factor x batch_size x row_bytes``,
+        pinned, so raise this only once the batch size is modest.
     :param autosave_every: Save a periodic checkpoint every *N* epochs.
     :param resume_checkpoint: Path to a checkpoint to resume from.
     :param use_amp: Enable automatic mixed precision.
@@ -44,6 +47,7 @@ class TrainingConfig:
     scheduler_patience: int = 20
     validation_fraction: float = 0.1
     num_workers: int = 1
+    prefetch_factor: int = 4
     autosave_every: int = 10
     resume_checkpoint: Path | None = None
     use_amp: bool = False

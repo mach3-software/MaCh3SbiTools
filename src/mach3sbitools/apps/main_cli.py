@@ -819,7 +819,7 @@ def merge_shards(
 @click.option(
     "--chunk_rows",
     type=int,
-    default=500_000,
+    default=262_144,
     show_default=True,
     help="Rows per streamed chunk.",
 )

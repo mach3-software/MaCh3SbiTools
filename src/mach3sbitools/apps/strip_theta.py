@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import warnings
 from pathlib import Path
 
@@ -37,8 +38,8 @@ from .merge_shards import METADATA_FILENAME
 
 warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
-#: Rows per streamed chunk. At 299 float32 columns this is ~600 MB per read.
-DEFAULT_CHUNK_ROWS = 500_000
+#: Rows per streamed chunk. At 299 float32 columns this is ~310 MB per read.
+DEFAULT_CHUNK_ROWS = 262_144
 
 #: Rows spot-checked against the source after the rewrite.
 _VERIFY_ROWS = 16
@@ -160,19 +161,73 @@ def strip_theta_module(
                 f"{dest_path} already exists please rename or use another output dir"
             )
 
-    out = np.lib.format.open_memmap(
-        dest_path, mode="w+", dtype=theta.dtype, shape=(n_rows, n_keep)
+    # Everything below deliberately avoids mmap for the bulk copy. Both files
+    # are touched exactly once, front to back, which is the case plain
+    # buffered read/write handles best: one large sequential syscall per
+    # chunk. An mmap'd write instead faults page by page, and on a network
+    # filesystem each fault can become its own round trip -- which is how a
+    # streaming rewrite ends up running at a fraction of disk bandwidth.
+    src_dtype = theta.dtype
+    src_offset = theta.offset  # where the .npy header ends and data begins
+    del theta  # release the source mmap; we reopen it as a plain file below
+
+    # open_memmap writes a correct .npy header and preallocates the file; we
+    # then close it and write the body through a plain file handle.
+    dst_mm = np.lib.format.open_memmap(
+        dest_path, mode="w+", dtype=src_dtype, shape=(n_rows, n_keep)
+    )
+    dst_offset = dst_mm.offset
+    del dst_mm
+
+    cols = np.flatnonzero(keep)
+    row_bytes = n_cols * src_dtype.itemsize
+
+    # Allocated once and reused. The previous version materialised a fresh
+    # chunk-sized array on every iteration.
+    src_buf = np.empty((chunk_rows, n_cols), dtype=src_dtype)
+    src_bytes = src_buf.reshape(-1).view(np.uint8)
+
+    t_start = time.perf_counter()
+    bytes_read = 0
+
+    with open(theta_path, "rb") as f_src, open(dest_path, "r+b") as f_dst:
+        f_src.seek(src_offset)
+        f_dst.seek(dst_offset)
+
+        done = 0
+        pbar = tqdm(total=n_rows, desc=f"Stripping {theta_path.name}", unit="row")
+        while done < n_rows:
+            rows = min(chunk_rows, n_rows - done)
+            want = rows * row_bytes
+
+            got = f_src.readinto(src_bytes[:want].data)
+            if got != want:
+                raise OSError(
+                    f"Short read from {theta_path} at row {done}: "
+                    f"wanted {want} bytes, got {got}"
+                )
+
+            # np.take returns a fresh C-contiguous block, so tofile writes it
+            # straight out with no further copy.
+            np.take(src_buf[:rows], cols, axis=1).tofile(f_dst)
+
+            done += rows
+            bytes_read += want
+            elapsed = time.perf_counter() - t_start
+            pbar.set_postfix_str(f"{bytes_read / elapsed / 1e6:.0f} MB/s read")
+            pbar.update(rows)
+        pbar.close()
+
+    elapsed = time.perf_counter() - t_start
+    logger.info(
+        "Copied %.1f GB in %.0f s (%.0f MB/s read, %.0f MB/s written)",
+        bytes_read / 1e9,
+        elapsed,
+        bytes_read / max(elapsed, 1e-9) / 1e6,
+        n_rows * n_keep * src_dtype.itemsize / max(elapsed, 1e-9) / 1e6,
     )
 
-    for start in tqdm(
-        range(0, n_rows, chunk_rows),
-        desc=f"Stripping {theta_path.name}",
-    ):
-        end = min(start + chunk_rows, n_rows)
-        out[start:end] = theta[start:end][:, keep]
-
-    out.flush()
-    del out
+    theta = np.load(theta_path, mmap_mode="r")  # reopened only for _verify
 
     _verify(theta, dest_path, keep, np.random.default_rng(seed))
     del theta  # release the source mmap before any rename

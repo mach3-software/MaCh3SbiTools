@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from mach3sbitools.data_processors import CompressorBase
 from mach3sbitools.simulator import Prior
 from mach3sbitools.utils import get_logger
 
@@ -34,6 +35,10 @@ class TrainingDataset(Dataset):
         self._nuisance_filter = prior.nuisance_filter.cpu().bool()
         self._n_full = int(self._nuisance_filter.numel())
         self._n_kept = int(self._nuisance_filter.sum())
+
+        # Applied to every batch after reading; see set_compressors.
+        self._theta_compressor: CompressorBase | None = None
+        self._x_compressor: CompressorBase | None = None
 
         self._check_merge_metadata(prior)
 
@@ -79,6 +84,44 @@ class TrainingDataset(Dataset):
             f"Data pre-filtered at merge time: {len(merged_names)} theta columns "
             f"(matches prior)"
         )
+
+    def set_compressors(
+        self,
+        theta_compressor: CompressorBase | None = None,
+        x_compressor: CompressorBase | None = None,
+    ) -> None:
+        """
+        Attach fitted compressors, applied to every sample after reading.
+
+        Doing it here rather than at the call sites is what keeps the whole
+        pipeline consistent: the density estimator is sized from this same
+        dataset, so the network, the training batches and the validation
+        batches all see the compressed dimensionality automatically.
+
+        Note this does not reduce I/O -- full-width rows are still read off
+        disk and then projected. To save reads the projection has to be
+        applied to the stored data instead.
+
+        :param theta_compressor: Fitted compressor for theta, or ``None``.
+        :param x_compressor: Fitted compressor for x, or ``None``.
+        """
+        self._theta_compressor = theta_compressor
+        self._x_compressor = x_compressor
+
+    @property
+    def has_compressors(self) -> bool:
+        """True once :meth:`set_compressors` has attached at least one."""
+        return self._theta_compressor is not None or self._x_compressor is not None
+
+    def _compress(
+        self, theta: torch.Tensor, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply whichever compressors are attached. No-op when there are none."""
+        if self._theta_compressor is not None:
+            theta = self._theta_compressor.transform(theta)
+        if self._x_compressor is not None:
+            x = self._x_compressor.transform(x)
+        return theta, x
 
     def _ensure_open(self):
         if self._theta is None:
@@ -176,7 +219,7 @@ class TrainingDataset(Dataset):
         theta_batch = self._filter_theta(torch.from_numpy(theta_np).float())
         x_batch = torch.from_numpy(x_np).float()
 
-        return theta_batch, x_batch
+        return self._compress(theta_batch, x_batch)
 
     def __getitem__(self, idx):
         self._ensure_open()
@@ -189,4 +232,4 @@ class TrainingDataset(Dataset):
 
         theta = self._filter_theta(theta)
 
-        return theta, x
+        return self._compress(theta, x)

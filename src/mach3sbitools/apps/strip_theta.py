@@ -45,6 +45,75 @@ DEFAULT_CHUNK_ROWS = 262_144
 _VERIFY_ROWS = 16
 
 
+def _advise_sequential(fd: int) -> None:
+    """Hint that this file is read front-to-back, so the kernel reads ahead."""
+    fadvise = getattr(os, "posix_fadvise", None)
+    flag = getattr(os, "POSIX_FADV_SEQUENTIAL", None)
+    if fadvise is None or flag is None:
+        return
+    try:
+        fadvise(fd, 0, 0, flag)
+    except OSError:
+        pass
+
+
+def _drop_from_cache(fd: int, offset: int, length: int) -> None:
+    """
+    Tell the kernel we are finished with a byte range.
+
+    Neither file is re-read, so every page either side of this copy is dead
+    the moment it has been used -- but the kernel does not know that and will
+    happily fill memory with all ~130 GB of it. Under a cgroup memory limit
+    (which is what SLURM gives a job) page cache counts against the limit, so
+    a long streaming copy can be OOM-killed despite the process itself using
+    only a few hundred MB. Dropping each range as we pass it keeps the
+    footprint flat. No-op where posix_fadvise is unavailable (e.g. macOS).
+    """
+    fadvise = getattr(os, "posix_fadvise", None)
+    flag = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if fadvise is None or flag is None:
+        return
+    try:
+        fadvise(fd, offset, length, flag)
+    except OSError:
+        pass
+
+
+def _memory_snapshot() -> str:
+    """
+    Process RSS and cgroup usage, for the progress line.
+
+    Worth surfacing because the two disagree in exactly the way that matters
+    here: a streaming copy keeps RSS flat while page cache climbs, and it is
+    the cgroup number -- which counts that cache -- that gets a SLURM job
+    killed. Returns "" off Linux, where neither file exists.
+    """
+    parts = []
+    try:
+        with open("/proc/self/statm") as f:
+            rss_pages = int(f.read().split()[1])
+        parts.append(f"rss {rss_pages * os.sysconf('SC_PAGE_SIZE') / 1e9:.1f}G")
+    except (OSError, IndexError, ValueError):
+        pass
+
+    for cgroup_file in (
+        "/sys/fs/cgroup/memory.current",  # cgroup v2
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes",  # cgroup v1
+    ):
+        try:
+            with open(cgroup_file) as f:
+                parts.append(f"cgroup {int(f.read().strip()) / 1e9:.1f}G")
+            break
+        except (OSError, ValueError):
+            continue
+
+    return " ".join(parts)
+
+
+#: True when we can actually manage the page cache; see _drop_from_cache.
+_CAN_DROP_CACHE = hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED")
+
+
 def _verify(source: np.ndarray, dest_path: Path, keep: np.ndarray, rng) -> None:
     """Spot-check that randomly chosen output rows match the masked source."""
     dest = np.load(dest_path, mmap_mode="r")
@@ -187,13 +256,28 @@ def strip_theta_module(
     src_buf = np.empty((chunk_rows, n_cols), dtype=src_dtype)
     src_bytes = src_buf.reshape(-1).view(np.uint8)
 
+    if _CAN_DROP_CACHE:
+        logger.info(
+            "Dropping page cache behind the copy; expected RSS ~%.1f GB",
+            chunk_rows * n_cols * src_dtype.itemsize / 1e9,
+        )
+    else:
+        logger.warning(
+            "posix_fadvise unavailable on this platform: page cache will grow "
+            "as the copy proceeds. Harmless with free RAM, but under a cgroup "
+            "memory limit it can get the job killed."
+        )
+
     t_start = time.perf_counter()
     bytes_read = 0
 
     with open(theta_path, "rb") as f_src, open(dest_path, "r+b") as f_dst:
+        _advise_sequential(f_src.fileno())
         f_src.seek(src_offset)
         f_dst.seek(dst_offset)
 
+        src_pos = src_offset
+        dst_pos = dst_offset
         done = 0
         pbar = tqdm(total=n_rows, desc=f"Stripping {theta_path.name}", unit="row")
         while done < n_rows:
@@ -209,12 +293,29 @@ def strip_theta_module(
 
             # np.take returns a fresh C-contiguous block, so tofile writes it
             # straight out with no further copy.
-            np.take(src_buf[:rows], cols, axis=1).tofile(f_dst)
+            out_block = np.take(src_buf[:rows], cols, axis=1)
+            out_block.tofile(f_dst)
+            out_bytes = out_block.nbytes
 
+            if _CAN_DROP_CACHE:
+                # Source pages are spent as soon as they are copied.
+                _drop_from_cache(f_src.fileno(), src_pos, want)
+                # Written pages can only be dropped once they are clean, so
+                # force this chunk out before discarding it. This also bounds
+                # dirty memory, which is the part the kernel cannot reclaim
+                # under pressure.
+                f_dst.flush()
+                os.fsync(f_dst.fileno())
+                _drop_from_cache(f_dst.fileno(), dst_pos, out_bytes)
+
+            src_pos += want
+            dst_pos += out_bytes
             done += rows
             bytes_read += want
             elapsed = time.perf_counter() - t_start
-            pbar.set_postfix_str(f"{bytes_read / elapsed / 1e6:.0f} MB/s read")
+            pbar.set_postfix_str(
+                f"{bytes_read / elapsed / 1e6:.0f} MB/s  {_memory_snapshot()}"
+            )
             pbar.update(rows)
         pbar.close()
 

@@ -125,6 +125,11 @@ class InferenceHandler:
         """
 
         assert self.dataset is not None
+        if self.dataset.has_compressors:
+            raise RuntimeError(
+                "Compressors are already attached to the dataset; fitting now "
+                "would fit on already-compressed data. Build a fresh handler."
+            )
         n_probe = min(100000, len(self.dataset))
         _, x = self.dataset[:n_probe]
 
@@ -138,6 +143,11 @@ class InferenceHandler:
         if self.dataset is None:
             raise ValueError("No data provided")
 
+        if self.dataset.has_compressors:
+            raise RuntimeError(
+                "Compressors are already attached to the dataset; fitting now "
+                "would fit on already-compressed data. Build a fresh handler."
+            )
         n_probe = min(100000, len(self.dataset))
         theta, _ = self.dataset[:n_probe]
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
@@ -145,25 +155,32 @@ class InferenceHandler:
 
     def _apply_compression(self) -> None:
         """
-        Apply fitted compressors to the tensor dataset in-place.
+        Attach the fitted compressors to the dataset.
+
+        Everything downstream reads through the dataset -- including
+        :meth:`_build_density_estimator_from_inference`, which sizes the
+        network -- so attaching here is what makes the network, the training
+        batches and the validation batches agree on the compressed
+        dimensionality. Previously this method transformed a throwaway probe
+        and discarded it, leaving the network sized for uncompressed x while
+        ``sample_posterior`` compressed its input, so sampling failed on a
+        shape mismatch.
+
+        Idempotent, and a no-op when no compressor has been fitted.
         """
         if self.dataset is None:
-            raise ValueError("call load_training_data before applying compression")
-        n_probe = min(100000, len(self.dataset))
+            raise ValueError("call set_dataset before applying compression")
 
-        theta, x = self.dataset[:n_probe]
+        if self._theta_compressor is None and self._x_compressor is None:
+            return
 
-        if self._theta_compressor:
-            theta = self._theta_compressor.transform(theta)
-        if self._x_compressor:
-            x = self._x_compressor.transform(x)
+        self.dataset.set_compressors(self._theta_compressor, self._x_compressor)
 
-        # Rebuild the dataset so downstream consumers see the compressed tensors.
-
+        theta, x = self.dataset[:2]
         logger.info(
-            "After compression — theta shape: %s | x shape: %s",
-            tuple(theta.shape),
-            tuple(x.shape),
+            "Compression active — theta dim: [cyan]%d[/] | x dim: [cyan]%d[/]",
+            theta.shape[-1],
+            x.shape[-1],
         )
 
     def create_posterior(self, config: PosteriorConfig) -> None:
@@ -249,6 +266,11 @@ class InferenceHandler:
     ) -> None:
         """Internal: run the Lightning training loop."""
         assert self.dataset
+
+        # Also covers resume_training, which restores compressors from the
+        # checkpoint: without this the network would expect compressed input
+        # while the dataloader yielded raw rows.
+        self._apply_compression()
 
         lightning_module = SBILightningModule(
             density_estimator,

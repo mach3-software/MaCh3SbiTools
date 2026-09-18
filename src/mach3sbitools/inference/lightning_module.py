@@ -77,7 +77,14 @@ class SBILightningModule(L.LightningModule):
         self.model_config = model_config
         # Needed for scheduling
         self.lr = config.learning_rate
-        self.save_hyperparameters(ignore=["density_estimator"])
+        # The compressors are persisted as plain state dicts in
+        # on_save_checkpoint. Letting save_hyperparameters also stash the live
+        # objects puts arbitrary classes in the checkpoint, which
+        # torch.load(weights_only=True) -- Lightning's default on resume --
+        # refuses to unpickle, so resuming a compressed run would fail.
+        self.save_hyperparameters(
+            ignore=["density_estimator", "x_compressor", "theta_compressor"]
+        )
 
         # EMA state
         self.ema_val_loss: float = float("inf")

@@ -7,6 +7,7 @@ Covers:
   - InferenceHandler.train_posterior — Lightning path
 """
 
+import itertools
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,9 +15,9 @@ import lightning as L
 import pytest
 import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset
 
-from mach3sbitools.data_loaders import SBIDataModule
+from mach3sbitools.data_loaders import BlockShuffleSampler, SBIDataModule
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.inference.lightning_module import SBILightningModule
 from mach3sbitools.utils.config import TrainingConfig
@@ -183,19 +184,62 @@ class TestSBIDataModule:
         dm.setup()
         loader = dm.train_dataloader()
         assert isinstance(loader, DataLoader)
-        assert isinstance(loader.sampler, RandomSampler)
         assert loader.drop_last is True
         assert loader.batch_size == 16
         assert loader.num_workers == 0
 
+        # Ordering comes from BlockShuffleSampler, not RandomSampler: assert
+        # the behaviour (order varies between epochs, indices are not a plain
+        # arange) rather than the class.
+        sampler = loader.sampler
+        assert isinstance(sampler, BlockShuffleSampler)
+        sampler.set_epoch(0)
+        first = list(sampler)
+        sampler.set_epoch(1)
+        second = list(sampler)
+        assert first != second, "epochs must differ"
+        assert sorted(first) == sorted(second), "epochs must cover the same rows"
+        assert first != sorted(first), "training order must not be sequential"
+
+    def test_train_dataloader_reads_contiguous_blocks(self, tmp_path):
+        """
+        The point of block shuffling: batches are decorrelated, but each
+        batch still resolves to a handful of contiguous reads rather than one
+        read per row. A regression here silently turns a compute-bound run
+        back into an input-bound one.
+        """
+        cfg = _minimal_config(tmp_path)
+        cfg.batch_size = 64
+        cfg.shuffle_block_size = 8
+        dm = SBIDataModule(DummyDataSet(n=4096), cfg)
+        dm.setup()
+        sampler = dm.train_dataloader().sampler
+        sampler.set_epoch(0)
+        batch = sorted(list(sampler)[:64])
+
+        runs = 1
+        for prev, nxt in itertools.pairwise(batch):
+            if nxt != prev + 1:
+                runs += 1
+        assert runs <= 64 // cfg.shuffle_block_size, (
+            f"{runs} reads for a 64-row batch at block_size="
+            f"{cfg.shuffle_block_size}; blocks are being split"
+        )
+
     def test_val_dataloader_properties(self, tmp_path):
         """Val loader should not shuffle and use zero workers."""
-        dm = SBIDataModule(DummyDataSet(), _minimal_config(tmp_path))
+        cfg = _minimal_config(tmp_path)
+        dm = SBIDataModule(DummyDataSet(), cfg)
         dm.setup()
         loader = dm.val_dataloader()
         assert isinstance(loader, DataLoader)
-        assert isinstance(loader.sampler, SequentialSampler)
         assert loader.num_workers == 0
+        # Not a SequentialSampler any more, but it must still yield rows in
+        # order -- validation loss should not depend on batch composition.
+        order = list(loader.sampler)
+        assert order == sorted(order) == list(range(len(order)))
+        # Validation is no-grad, so it runs at a multiple of the train batch.
+        assert loader.batch_size == cfg.batch_size * cfg.val_batch_multiplier
 
 
 # ─────────────────────────────────────────────────────────────────────────────

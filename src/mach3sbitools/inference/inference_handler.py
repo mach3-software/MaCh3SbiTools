@@ -134,6 +134,7 @@ class InferenceHandler:
         _, x = self.dataset[:n_probe]
 
         self._x_compressor = compressor_factory(compressor, **kwargs).fit(x)
+        self.dataset.release_buffers()
         logger.info(f"Fitted x with {compressor}")
 
     def fit_theta_compressor(self, compressor: str, **kwargs):
@@ -151,6 +152,7 @@ class InferenceHandler:
         n_probe = min(100000, len(self.dataset))
         theta, _ = self.dataset[:n_probe]
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
+        self.dataset.release_buffers()
         logger.info(f"Fitted theta with {compressor}")
 
     def _apply_compression(self) -> None:
@@ -290,7 +292,10 @@ class InferenceHandler:
             logger.warning(
                 "Requested model compilation. In testing this has been shown to be slower."
             )
-            lightning_module.model = torch.compile(lightning_module.model)
+            # Only loss_fn. training_step/validation_step call that, never
+            # forward, so compiling the module itself buys nothing and only
+            # wraps it in an OptimizedModule whose parameter names pick up an
+            # `_orig_mod.` prefix in the logged weight/grad histograms.
             lightning_module.loss_fn = torch.compile(
                 lightning_module.model.loss, dynamic=False
             )
@@ -511,7 +516,12 @@ class InferenceHandler:
         # 10 samples (the previous value) gives wildly inaccurate mean/std
         n_probe = min(100_000, len(self.dataset))
         sample_theta, sample_x = self.dataset[:n_probe]
-        return cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
+        net = cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
+        # The 100k-row read sized the dataset's reusable buffers to 100k rows,
+        # and they only ever grow. Left attached they would be forked into
+        # every DataLoader worker for the rest of training.
+        self.dataset.release_buffers()
+        return net
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:
         """Construct a Lightning Trainer from *config*."""
@@ -530,6 +540,10 @@ class InferenceHandler:
             enable_progress_bar=config.show_progress,
             log_every_n_steps=50,
             strategy="auto",
+            # BlockShuffleSampler already gives each rank a disjoint,
+            # equal-length share. Letting Lightning swap in a DistributedSampler
+            # would replace it and put us back on row-granular shuffling.
+            use_distributed_sampler=False,
             accelerator=acc,
             devices="auto",
             num_nodes=int(os.environ.get("SLURM_NNODES", 1)),

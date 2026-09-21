@@ -359,6 +359,25 @@ def save_data(
     ),
 )
 @optgroup.option(
+    "--shuffle_block_size",
+    default=128,
+    type=int,
+    show_default=True,
+    help=(
+        "Rows per contiguous block; blocks are shuffled, rows are not. Size "
+        "to one filesystem record (128 rows of ~1 KiB = one 128 KiB ZFS "
+        "record). Raise on high-latency storage, lower to decorrelate more."
+    ),
+)
+@optgroup.option(
+    "--val_batch_multiplier",
+    default=4,
+    type=int,
+    show_default=True,
+    help="Validation batch size as a multiple of --batch_size. Validation is "
+    "no-grad, so a larger batch costs no extra memory.",
+)
+@optgroup.option(
     "--use_amp",
     is_flag=True,
     default=False,
@@ -449,6 +468,8 @@ def train(
     validation_fraction: float,
     num_workers: int,
     prefetch_factor: int,
+    shuffle_block_size: int,
+    val_batch_multiplier: int,
     autosave_every: int,
     resume_checkpoint: Path | None,
     use_amp: bool,
@@ -499,6 +520,8 @@ def train(
         validation_fraction,
         num_workers,
         prefetch_factor,
+        shuffle_block_size,
+        val_batch_multiplier,
         autosave_every,
         resume_checkpoint,
         use_amp,

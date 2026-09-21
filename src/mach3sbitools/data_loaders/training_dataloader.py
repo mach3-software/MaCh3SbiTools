@@ -292,12 +292,32 @@ class TrainingDataset(Dataset):
         take = np.fromiter((lookup[int(i)] for i in idx), dtype=np.intp, count=idx.size)
         return np.asarray(buf[:filled][take])
 
-    @staticmethod
-    def _pread_into(fd: int, target: np.ndarray, offset: int) -> None:
+    #: preadv reads straight into the destination buffer. os.pread cannot:
+    #: it allocates a bytes object the size of the request and we then copy
+    #: out of it, so every batch allocates and frees a second full copy of
+    #: itself. Absent on non-Linux, hence the fallback below.
+    _HAVE_PREADV = hasattr(os, "preadv")
+
+    @classmethod
+    def _pread_into(cls, fd: int, target: np.ndarray, offset: int) -> None:
         """Fill *target* from *fd* at *offset*, looping until it is full."""
         want = target.nbytes
         done = 0
+        # target.data is the ndarray's buffer; memoryview() of the array
+        # itself is untyped for mypy and needs the same cast anyway.
+        view = target.data.cast("B") if cls._HAVE_PREADV else None
+
         while done < want:
+            if view is not None:
+                got = os.preadv(fd, [view[done:]], offset + done)
+                if not got:
+                    raise OSError(
+                        f"Unexpected end of file at offset {offset + done} "
+                        f"(wanted {want} bytes, got {done})"
+                    )
+                done += got
+                continue
+
             chunk = os.pread(fd, want - done, offset + done)
             if not chunk:
                 raise OSError(
@@ -306,6 +326,20 @@ class TrainingDataset(Dataset):
                 )
             target[done : done + len(chunk)] = np.frombuffer(chunk, dtype=np.uint8)
             done += len(chunk)
+
+    def release_buffers(self) -> None:
+        """
+        Drop the reusable read buffers.
+
+        They only ever grow (see :meth:`_pread_rows`), so one large probe read
+        -- fitting a compressor, or sizing the density estimator off 100k rows
+        -- leaves a buffer that size attached to the dataset for the rest of
+        the run, and forks a copy of it into every DataLoader worker. Call
+        this after a probe to hand the memory back; the next read reallocates
+        at whatever size it actually needs.
+        """
+        self._theta_buf = None
+        self._x_buf = None
 
     def _filter_theta(self, theta: torch.Tensor) -> torch.Tensor:
         """

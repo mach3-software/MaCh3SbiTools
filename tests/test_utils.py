@@ -11,9 +11,9 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+from mach3sbitools.utils.file_utils import from_feather, to_feather
 
 from mach3sbitools.utils.device_handler import TensorConversionError, TorchDeviceHandler
-from mach3sbitools.utils.file_utils import from_feather, to_feather
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TorchDeviceHandler

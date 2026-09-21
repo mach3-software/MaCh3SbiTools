@@ -37,6 +37,16 @@ class TrainingConfig:
     :param ema_alpha: EMA smoothing factor for validation loss used in early
         stopping. Smaller values are smoother.
     :param compile: Compile the model with ``torch.compile``.
+    :param shuffle_block_size: Rows per contiguous block in
+        :class:`~mach3sbitools.data_loaders.BlockShuffleSampler`. Blocks are
+        shuffled, not rows, so each read stays one filesystem record wide.
+        Size it to the storage: ~128 rows is one 128 KiB ZFS record at ~1 KiB
+        per row. Larger reads faster but decorrelates less.
+    :param shuffle_seed: Base seed for block shuffling. The epoch is added to
+        it, so all ranks agree within an epoch and differ between epochs.
+    :param val_batch_multiplier: Validation batch size relative to training.
+        Validation runs under ``no_grad``, so a larger batch costs no extra
+        memory.
     """
 
     save_path: Path | None = None
@@ -57,6 +67,9 @@ class TrainingConfig:
     ema_alpha: float = 0.05
     compile: bool = False
     prune_model: float | None = None
+    shuffle_block_size: int = 128
+    shuffle_seed: int = 42
+    val_batch_multiplier: int = 4
 
 
 @dataclass

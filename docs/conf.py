@@ -10,6 +10,7 @@ author = "Henry Wallace"
 release = get_version("mach3sbitools")
 version = release
 html_logo = "_static/mach3sbi_logo.png"
+html_favicon = "_static/mach3sbi_logo.png"
 
 html_theme_options = {
     "sidebar_hide_name": True,

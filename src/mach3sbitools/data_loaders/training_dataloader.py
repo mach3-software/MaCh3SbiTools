@@ -217,8 +217,11 @@ class TrainingDataset(Dataset):
         if self._theta_fd is not None and self._fd_pid == pid:
             return
 
-        self._theta_fd = os.open(self.theta_path, os.O_RDONLY)
-        self._x_fd = os.open(self.x_path, os.O_RDONLY)
+        # O_BINARY only exists (and matters) on Windows, where descriptors
+        # otherwise default to text mode and translate CRLF in the data.
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        self._theta_fd = os.open(self.theta_path, flags)
+        self._x_fd = os.open(self.x_path, flags)
         self._fd_pid = pid
 
         advise_sequential(self._theta_fd)
@@ -298,6 +301,20 @@ class TrainingDataset(Dataset):
     #: itself. Absent on non-Linux, hence the fallback below.
     _HAVE_PREADV = hasattr(os, "preadv")
 
+    #: Windows has neither pread nor preadv; there we seek then read. That
+    #: moves the shared file position, which is safe only because each
+    #: process opens its own descriptors (see _ensure_open) and a dataset is
+    #: not read from several threads at once.
+    _HAVE_PREAD = hasattr(os, "pread")
+
+    @classmethod
+    def _read_at(cls, fd: int, n: int, offset: int) -> bytes:
+        """Read up to *n* bytes from *fd* at *offset*."""
+        if cls._HAVE_PREAD:
+            return os.pread(fd, n, offset)
+        os.lseek(fd, offset, os.SEEK_SET)
+        return os.read(fd, n)
+
     @classmethod
     def _pread_into(cls, fd: int, target: np.ndarray, offset: int) -> None:
         """Fill *target* from *fd* at *offset*, looping until it is full."""
@@ -318,7 +335,7 @@ class TrainingDataset(Dataset):
                 done += got
                 continue
 
-            chunk = os.pread(fd, want - done, offset + done)
+            chunk = cls._read_at(fd, want - done, offset + done)
             if not chunk:
                 raise OSError(
                     f"Unexpected end of file at offset {offset + done} "

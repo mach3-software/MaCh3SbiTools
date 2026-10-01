@@ -2,6 +2,7 @@
 Tests for mach3sbitools.data_loaders.TrainingDataset.
 """
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -126,3 +127,29 @@ class TestTrainingDataset:
         np.save(short_x, np.load(indexed_merged / "x.npy")[:-1])
         with pytest.raises(ValueError, match="do not match"):
             TrainingDataset(indexed_merged / "theta.npy", short_x, prior)
+
+    @pytest.mark.parametrize(
+        ("have_preadv", "have_pread"),
+        [(True, True), (False, True), (False, False)],
+        ids=["preadv", "pread", "seek_read"],
+    )
+    def test_read_paths_agree(
+        self, monkeypatch, indexed_merged, prior, have_preadv, have_pread
+    ):
+        """Every platform read path returns the same rows (seek_read is Windows)."""
+        if have_preadv and not hasattr(os, "preadv"):
+            pytest.skip("os.preadv unavailable on this platform")
+        if have_pread and not hasattr(os, "pread"):
+            pytest.skip("os.pread unavailable on this platform")
+
+        monkeypatch.setattr(TrainingDataset, "_HAVE_PREADV", have_preadv)
+        monkeypatch.setattr(TrainingDataset, "_HAVE_PREAD", have_pread)
+        ds = TrainingDataset(
+            indexed_merged / "theta.npy", indexed_merged / "x.npy", prior
+        )
+
+        indices = [120, 3, 77, 4, 149, 0]
+        theta, x = ds.__getitems__(indices)
+        expected = torch.tensor(indices, dtype=torch.float32)
+        torch.testing.assert_close(theta[:, 0], expected)
+        torch.testing.assert_close(x[:, 0], expected)

@@ -53,6 +53,7 @@ def from_feather(
 
     return theta, x
 
+
 def to_feather(
     file_name: Path,
     theta_values: SimulatorData,
@@ -87,7 +88,7 @@ def peek_num_rows(file_name: Path) -> int:
         file_name = Path(file_name)
 
     with memory_map(str(file_name), "r") as source:
-        return ipc.open_file(source).read_all().num_rows
+        return int(ipc.open_file(source).read_all().num_rows)
 
 
 def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
@@ -96,7 +97,7 @@ def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
     n_rows = len(arr)
     flat = arr.flatten().to_numpy(zero_copy_only=False)
     n_features = flat.shape[0] // n_rows
-    return flat.reshape(n_rows, n_features)
+    return np.asarray(flat.reshape(n_rows, n_features))
 
 
 class FeatherFileHandle:
@@ -106,7 +107,7 @@ class FeatherFileHandle:
     ``compression="uncompressed"``.
     """
 
-    __slots__ = ("path", "_source", "theta", "x")
+    __slots__ = ("_source", "path", "theta", "x")
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -117,7 +118,7 @@ class FeatherFileHandle:
 
     @property
     def num_rows(self) -> int:
-        return self.theta.shape[0]
+        return int(self.theta.shape[0])
 
     def close(self) -> None:
         self._source.close()

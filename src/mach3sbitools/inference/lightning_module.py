@@ -7,9 +7,11 @@ import time
 import lightning as L
 import torch
 from sbi.neural_nets.estimators.base import ConditionalEstimator
-from torch.distributed.checkpoint.state_dict import get_model_state_dict, StateDictOptions
 from torch.distributed._composable.fsdp import fully_shard
-
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+)
 
 from mach3sbitools.data_processors import CompressorBase
 from mach3sbitools.utils import PosteriorConfig, TrainingConfig
@@ -215,8 +217,6 @@ class SBILightningModule(L.LightningModule):
             self.log(f"grad_norms/{name}", layer_grad_norm, sync_dist=False)
 
         self.log("train/grad_norm", total_grad_norm_sq**0.5, sync_dist=False)
-
-
 
     # ── Validation ────────────────────────────────────────────────────────────
 

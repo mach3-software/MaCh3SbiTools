@@ -64,6 +64,7 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         self._upper_np: np.ndarray = upper_bounds.detach().cpu().numpy()
 
         super().__init__(loc=mean, scale_tril=chol)
+
     # ── Bounds helper ───────────────────────────────────────────────────────
 
     def in_bounds(self, value: torch.Tensor) -> torch.Tensor:

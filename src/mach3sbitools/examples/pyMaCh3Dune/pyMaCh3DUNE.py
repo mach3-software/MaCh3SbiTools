@@ -9,20 +9,19 @@ from yaml import safe_load
 from .helpers import process_parameters
 
 try:
-    from pyMaCh3_DUNE import parameters, samples
-
     # NOTE: assuming `Manager` is exposed from the core pyMaCh3 module as
     # `pyMaCh3.manager.Manager` (not from pyMaCh3_DUNE). Adjust this import
     # to match wherever your core bindings actually expose it.
     from pyMaCh3.manager import Manager
+    from pyMaCh3_DUNE import parameters, samples
 
     HAS_PYMACH3 = True
 except ImportError:
     HAS_PYMACH3 = False
 
 if TYPE_CHECKING:
-    from pyMaCh3_DUNE import parameters, samples
     from pyMaCh3.manager import Manager
+    from pyMaCh3_DUNE import parameters, samples
 
 from mach3sbitools.utils.logger import get_logger
 
@@ -167,7 +166,7 @@ class pyMaCh3DUNESimulator:
         :return: list of constructed SampleHandlerBase instances
         """
         fit_manager = Manager(str(fitter_config))
-        return samples.MaCh3DuneSampleFactory(fit_manager, parameter_handler)
+        return list(samples.MaCh3DuneSampleFactory(fit_manager, parameter_handler))
 
     def _set_parameter_values(self, theta: list[float] | np.ndarray):
         """

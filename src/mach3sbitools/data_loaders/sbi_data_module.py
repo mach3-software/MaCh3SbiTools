@@ -33,6 +33,8 @@ for no benefit.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sized
+from typing import cast
 
 import lightning as L
 import torch
@@ -101,8 +103,9 @@ class SBIDataModule(L.LightningDataModule):
             message=".*LeafSpec.*",
             category=UserWarning,
         )
-        n_val = int(len(self.dataset) * self.config.validation_fraction)
-        n_train = len(self.dataset) - n_val
+        n_total = len(cast(Sized, self.dataset))
+        n_val = int(n_total * self.config.validation_fraction)
+        n_train = n_total - n_val
         self.train_dataset, self.val_dataset = random_split(
             self.dataset,
             [n_train, n_val],

@@ -227,14 +227,15 @@ class InferenceHandler:
         """
         Train the density estimator from scratch using PyTorch Lightning.
 
-        Requires :meth:`load_training_data` and :meth:`create_posterior` to
-        have been called first.
+        Requires :meth:`set_dataset` and :meth:`create_posterior` to have
+        been called first.
 
         :param config: Training loop settings.
         :param model_config: Architecture config embedded in every checkpoint.
         :raises ValueError: If training data or the NPE object are missing.
         """
-        assert self.dataset
+        if self.dataset is None:
+            raise ValueError("Call set_dataset() before train_posterior().")
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
 
@@ -359,6 +360,9 @@ class InferenceHandler:
             raise ValueError("Train or load a density estimator first.")
 
         x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
+        # A single 1-D observation gets (num_samples, theta_dim) back; a batch
+        # of observations keeps the sampler's (num_samples, n_obs, theta_dim).
+        single_observation = x_tensor.dim() == 1
 
         if self._x_compressor is not None:
             x_tensor = self._x_compressor.transform(x_tensor).to(
@@ -403,6 +407,9 @@ class InferenceHandler:
             max_sampling_time=kwargs.get("max_sampling_time", None),
             return_partial_on_timeout=True,
         )[0]
+
+        if single_observation:
+            samples_compressed = samples_compressed.squeeze(1)
 
         if self._theta_compressor is not None:
             return self._theta_compressor.inverse_transform(samples_compressed)

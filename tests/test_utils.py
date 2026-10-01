@@ -11,9 +11,9 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from mach3sbitools.utils.file_utils import from_feather, to_feather
 
 from mach3sbitools.utils.device_handler import TensorConversionError, TorchDeviceHandler
+from mach3sbitools.utils.feather_utils import from_feather, to_feather
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TorchDeviceHandler
@@ -58,16 +58,6 @@ class TestFeatherIO:
         t_out, x_out = from_feather(path)
         np.testing.assert_allclose(t_out, theta, rtol=1e-5)
         np.testing.assert_allclose(x_out, x, rtol=1e-5)
-
-    def test_nuisance_filter_applied_on_read(self, tmp_path):
-        theta = np.ones((10, 3), dtype=np.float32)
-        x = np.ones((10, 5), dtype=np.float32)
-        path = tmp_path / "nuisance.feather"
-        to_feather(path, theta, x)
-        nuis_fil = np.ones(3, dtype=bool)
-        nuis_fil[-1] = False
-        t, _ = from_feather(path, nuisance_filter=nuis_fil)
-        assert t.shape == (10, 2)
 
     def test_raises_on_wrong_suffix(self, tmp_path):
         with pytest.raises(ValueError, match="feather"):

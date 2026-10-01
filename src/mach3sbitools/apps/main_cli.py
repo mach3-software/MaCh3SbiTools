@@ -237,7 +237,7 @@ def save_data(
     "-d",
     type=click.Path(exists=True),
     required=True,
-    help="Path to folder of .feather simulation files.",
+    help="Folder containing the merged theta.npy and x.npy (see merge-shards).",
 )
 @optgroup.option(
     "--prior_path",

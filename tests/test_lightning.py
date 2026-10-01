@@ -305,17 +305,17 @@ class TestInferenceHandlerLightning:
         # No tensor dataset
         handler = InferenceHandler(prior_save)
         handler.create_posterior(posterior_config)
-        with pytest.raises(ValueError, match="load_training_data"):
+        with pytest.raises(ValueError, match="set_dataset"):
             handler.train_posterior(training_config)
 
         # No inference object
         handler2 = InferenceHandler(prior_save)
-        handler2._tensor_dataset = TensorDataset(torch.zeros(10, 4), torch.zeros(10, 6))
+        handler2.dataset = MagicMock()
         with pytest.raises(ValueError, match="create_posterior"):
             handler2.train_posterior(training_config)
 
     def test_train_posterior_sets_density_estimator_in_eval_mode(
-        self, prior_save, dummy_data_dir, posterior_config, tmp_path
+        self, prior_save, merged_data_dir, posterior_config, tmp_path
     ):
         cfg = TrainingConfig(
             save_path=tmp_path / "model.ckpt",
@@ -326,8 +326,7 @@ class TestInferenceHandlerLightning:
             autosave_every=500,
         )
         handler = InferenceHandler(prior_save)
-        handler.set_dataset(dummy_data_dir)
-        handler.load_training_data()
+        handler.set_dataset(merged_data_dir)
         handler.create_posterior(posterior_config)
         handler.train_posterior(cfg, model_config=posterior_config)
 
@@ -335,12 +334,11 @@ class TestInferenceHandlerLightning:
         assert not handler._density_estimator.training
 
     def test_slurm_nnodes_env_respected(
-        self, prior_save, dummy_data_dir, posterior_config, tmp_path, monkeypatch
+        self, prior_save, merged_data_dir, posterior_config, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("SLURM_NNODES", "1")
         handler = InferenceHandler(prior_save)
-        handler.set_dataset(dummy_data_dir)
-        handler.load_training_data()
+        handler.set_dataset(merged_data_dir)
         handler.create_posterior(posterior_config)
 
         cfg = TrainingConfig(

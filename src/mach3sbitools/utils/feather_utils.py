@@ -89,7 +89,7 @@ def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
     n_rows = len(arr)
     flat = arr.flatten().to_numpy(zero_copy_only=False)
     n_features = flat.shape[0] // n_rows
-    return flat.reshape(n_rows, n_features)
+    return np.asarray(flat.reshape(n_rows, n_features))
 
 
 class FeatherFileHandle:

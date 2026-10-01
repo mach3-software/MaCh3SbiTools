@@ -1,21 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-from pyMaCh3_DUNE import parameters, samples
-
-# NOTE: assuming `Manager` is exposed from the core pyMaCh3 module as
-# `pyMaCh3.manager.Manager` (not from pyMaCh3_DUNE). Adjust this import
-# to match wherever your core bindings actually expose it.
-from pyMaCh3_DUNE._pyMaCh3.manager import Manager
 from yaml import safe_load
 
 from mach3sbitools.utils.logger import get_logger
 
 from .helpers import process_parameters
 
-HAS_PYMACH3 = True
+try:
+    from pyMaCh3_DUNE import parameters, samples
+    from pyMaCh3_DUNE._pyMaCh3.manager import Manager
+
+    HAS_PYMACH3 = True
+except ImportError:
+    HAS_PYMACH3 = False
+
+if TYPE_CHECKING:
+    from pyMaCh3_DUNE import parameters, samples
+    from pyMaCh3_DUNE._pyMaCh3.manager import Manager
 
 logger = get_logger()
 
@@ -158,7 +163,7 @@ class pyMaCh3DUNESimulator:
         :return: list of constructed SampleHandlerBase instances
         """
         fit_manager = Manager(str(fitter_config))
-        return samples.MaCh3DuneSampleFactory(fit_manager, parameter_handler)
+        return list(samples.MaCh3DuneSampleFactory(fit_manager, parameter_handler))
 
     def _set_parameter_values(self, theta: list[float] | np.ndarray):
         """

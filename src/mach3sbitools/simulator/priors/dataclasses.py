@@ -45,7 +45,7 @@ class PriorData(torch.nn.Module):
         self.lower_bounds = handler.to_tensor(self.lower_bounds)
         self.upper_bounds = handler.to_tensor(self.upper_bounds)
 
-    def to(self, device: torch.device | str) -> "PriorData":
+    def to(self, device: torch.device | str) -> "PriorData":  # type: ignore[override]
         """
         Move all tensor fields to *device* in-place.
 

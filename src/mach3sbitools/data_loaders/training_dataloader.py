@@ -45,7 +45,7 @@ class TrainingDataset(Dataset):
 
         self.prior = prior
         self.lengths = [peek_num_rows(f) for f in self.files]
-        self.cumsum = np.cumsum([0] + self.lengths)
+        self.cumsum = np.cumsum([0, *self.lengths])
         self._handles: dict[int, FeatherFileHandle] = {}
 
     def __len__(self) -> int:
@@ -79,8 +79,9 @@ class TrainingDataset(Dataset):
         if self.prior.nuisance_filter is not None:
             nuisance_filter = self.prior.nuisance_filter
             if isinstance(nuisance_filter, torch.Tensor):
-                nuisance_filter = nuisance_filter.to("cpu").numpy()
-            theta = theta[nuisance_filter]
+                theta = theta[nuisance_filter.to("cpu").numpy()]
+            else:
+                theta = theta[nuisance_filter]
 
         theta_t = torch.from_numpy(theta.astype(np.float32, copy=True))
         x_t = torch.from_numpy(x.astype(np.float32, copy=True))

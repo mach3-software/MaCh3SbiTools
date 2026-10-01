@@ -6,6 +6,10 @@ from pathlib import Path, PosixPath, WindowsPath
 from typing import cast
 
 import torch
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 
 from mach3sbitools.utils import (
     PosteriorConfig,

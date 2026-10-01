@@ -30,7 +30,7 @@ from sbi.inference.posteriors.posterior_parameters import DirectPosteriorParamet
 from sbi.neural_nets import posterior_nn
 from sbi.samplers.rejection import rejection
 from sbi.utils.user_input_checks import process_x
-from torch.utils.data import TensorDataset
+from tqdm.auto import tqdm
 
 from mach3sbitools.data_loaders import SBIDataModule, TrainingDataset
 from mach3sbitools.data_processors import (
@@ -79,7 +79,7 @@ class InferenceHandler:
         :param prior_path: Path to a pickled :class:`~mach3sbitools.simulator.Prior`.
         """
         self.device_handler = TorchDeviceHandler()
-        self.prior = load_prior(prior_path)  # .to(self.device_handler.device)
+        self.prior = load_prior(prior_path).to(self.device_handler.device)
         self.parameter_names = self.prior.prior_data.parameter_names
 
         # if len(
@@ -93,7 +93,6 @@ class InferenceHandler:
         self.inference: NPE | None = None
         self.posterior = None
         self._density_estimator: nn.Module | None = None
-        self._tensor_dataset: TensorDataset | None = None
 
         # Compression for X/Theta
         self._theta_compressor: CompressorBase | None = None
@@ -105,67 +104,88 @@ class InferenceHandler:
 
         :param data_folder: Directory containing ``.feather`` files.
         """
-        self.dataset = TrainingDataset(data_folder, self.prior)
+
+        x_data = data_folder / "x.npy"
+        theta_data = data_folder / "theta.npy"
+
+        if not x_data.is_file():
+            raise FileNotFoundError(f"Cannot find x data file: {x_data}")
+
+        if not theta_data.is_file():
+            raise FileNotFoundError(f"Cannot find theta data file: {theta_data}")
+
+        self.dataset = TrainingDataset(theta_data, x_data, self.prior)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
         )
-
-    def load_training_data(self, verbose: bool = True) -> None:
-        """..."""
-        if self.dataset is None:
-            raise ValueError("Call set_dataset() before load_training_data().")
-        self._tensor_dataset = self.dataset.to_tensor_dataset(
-            device="cpu", verbose=verbose
-        )
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
 
     def fit_x_compressor(self, compressor: str, **kwargs):
         """
         Compress X dim
         """
 
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+        assert self.dataset is not None
+        if self.dataset.has_compressors:
+            raise RuntimeError(
+                "Compressors are already attached to the dataset; fitting now "
+                "would fit on already-compressed data. Build a fresh handler."
+            )
+        n_probe = min(100000, len(self.dataset))
+        _, x = self.dataset[:n_probe]
 
-        _, x = self._tensor_dataset.tensors
         self._x_compressor = compressor_factory(compressor, **kwargs).fit(x)
+        self.dataset.release_buffers()
         logger.info(f"Fitted x with {compressor}")
 
     def fit_theta_compressor(self, compressor: str, **kwargs):
         """
         Compress theta dim
         """
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before fitting compressor")
+        if self.dataset is None:
+            raise ValueError("No data provided")
 
-        theta, _ = self._tensor_dataset.tensors
+        if self.dataset.has_compressors:
+            raise RuntimeError(
+                "Compressors are already attached to the dataset; fitting now "
+                "would fit on already-compressed data. Build a fresh handler."
+            )
+        n_probe = min(100000, len(self.dataset))
+        theta, _ = self.dataset[:n_probe]
         self._theta_compressor = compressor_factory(compressor, **kwargs).fit(theta)
+        self.dataset.release_buffers()
         logger.info(f"Fitted theta with {compressor}")
 
     def _apply_compression(self) -> None:
         """
-        Apply fitted compressors to the tensor dataset in-place.
+        Attach the fitted compressors to the dataset.
+
+        Everything downstream reads through the dataset -- including
+        :meth:`_build_density_estimator_from_inference`, which sizes the
+        network -- so attaching here is what makes the network, the training
+        batches and the validation batches agree on the compressed
+        dimensionality. Previously this method transformed a throwaway probe
+        and discarded it, leaving the network sized for uncompressed x while
+        ``sample_posterior`` compressed its input, so sampling failed on a
+        shape mismatch.
+
+        Idempotent, and a no-op when no compressor has been fitted.
         """
-        if self._tensor_dataset is None:
-            raise ValueError("call load_training_data before applying compression")
+        if self.dataset is None:
+            raise ValueError("call set_dataset before applying compression")
 
-        theta, x = self._tensor_dataset.tensors
+        if self._theta_compressor is None and self._x_compressor is None:
+            return
 
-        if self._theta_compressor:
-            theta = self._theta_compressor.transform(theta)
-        if self._x_compressor:
-            x = self._x_compressor.transform(x)
+        if self.dataset.has_compressors:
+            return  # already attached; nothing to do and nothing to re-log
 
-        # Rebuild the dataset so downstream consumers see the compressed tensors.
-        self._tensor_dataset = TensorDataset(theta, x)
-        for t in self._tensor_dataset.tensors:
-            t.share_memory_()
+        self.dataset.set_compressors(self._theta_compressor, self._x_compressor)
 
+        theta, x = self.dataset[:2]
         logger.info(
-            "After compression — theta shape: %s | x shape: %s",
-            tuple(theta.shape),
-            tuple(x.shape),
+            "Compression active — theta dim: [cyan]%d[/] | x dim: [cyan]%d[/]",
+            theta.shape[-1],
+            x.shape[-1],
         )
 
     def create_posterior(self, config: PosteriorConfig) -> None:
@@ -207,18 +227,20 @@ class InferenceHandler:
         """
         Train the density estimator from scratch using PyTorch Lightning.
 
-        Requires :meth:`load_training_data` and :meth:`create_posterior` to
-        have been called first.
+        Requires :meth:`set_dataset` and :meth:`create_posterior` to have
+        been called first.
 
         :param config: Training loop settings.
         :param model_config: Architecture config embedded in every checkpoint.
         :raises ValueError: If training data or the NPE object are missing.
         """
-        if self._tensor_dataset is None:
-            raise ValueError("Call load_training_data() before train_posterior().")
+        if self.dataset is None:
+            raise ValueError("Call set_dataset() before train_posterior().")
         if self.inference is None:
             raise ValueError("Call create_posterior() before train_posterior().")
 
+        # _fit applies compression too (it has to, for the resume path), but
+        # it must be attached before the estimator is sized from the dataset.
         self._apply_compression()
         density_estimator = self._build_density_estimator_from_inference()
         self._fit(density_estimator, config, model_config, ckpt_path=None)
@@ -251,7 +273,12 @@ class InferenceHandler:
         ckpt_path: str | None,
     ) -> None:
         """Internal: run the Lightning training loop."""
-        assert self._tensor_dataset is not None
+        assert self.dataset
+
+        # Also covers resume_training, which restores compressors from the
+        # checkpoint: without this the network would expect compressed input
+        # while the dataloader yielded raw rows.
+        self._apply_compression()
 
         lightning_module = SBILightningModule(
             density_estimator,
@@ -266,18 +293,16 @@ class InferenceHandler:
             logger.warning(
                 "Requested model compilation. In testing this has been shown to be slower."
             )
-            torch.compile(lightning_module)
+            # Only loss_fn. training_step/validation_step call that, never
+            # forward, so compiling the module itself buys nothing and only
+            # wraps it in an OptimizedModule whose parameter names pick up an
+            # `_orig_mod.` prefix in the logged weight/grad histograms.
+            lightning_module.loss_fn = torch.compile(
+                lightning_module.model.loss, dynamic=False
+            )
 
-        data_module = SBIDataModule(self._tensor_dataset, config)
+        data_module = SBIDataModule(self.dataset, config)
         trainer = self._build_trainer(config)
-
-        # TODO: Uncomment when lightning allows for ddp batched training and LR with multiple optimizers
-        # Currently LR decay is more effective than finding the perfect initial LR
-
-        # Set up tuning to get good initial LR + batch size that uses the optimal amount of memory!
-        # tuner = Tuner(trainer)
-        # tuner.scale_batch_size(lightning_module, mode="power", datamodule=data_module)
-        # tuner.lr_find(lightning_module, datamodule=data_module)
 
         trainer.fit(lightning_module, datamodule=data_module, ckpt_path=ckpt_path)
 
@@ -335,6 +360,10 @@ class InferenceHandler:
             raise ValueError("Train or load a density estimator first.")
 
         x_tensor = self.device_handler.to_tensor(x).to(self.device_handler.device)
+        # A single 1-D observation gets (num_samples, theta_dim) back; a batch
+        # of observations keeps the sampler's (num_samples, n_obs, theta_dim).
+        single_observation = x_tensor.dim() == 1
+
         if self._x_compressor is not None:
             x_tensor = self._x_compressor.transform(x_tensor).to(
                 self.device_handler.device
@@ -377,7 +406,10 @@ class InferenceHandler:
             alternative_method="build_posterior(..., sample_with='mcmc')",
             max_sampling_time=kwargs.get("max_sampling_time", None),
             return_partial_on_timeout=True,
-        )[0][:, 0]
+        )[0]
+
+        if single_observation:
+            samples_compressed = samples_compressed.squeeze(1)
 
         if self._theta_compressor is not None:
             return self._theta_compressor.inverse_transform(samples_compressed)
@@ -485,18 +517,22 @@ class InferenceHandler:
     def _build_density_estimator_from_inference(self) -> nn.Module:
         if self.inference is None:
             raise ValueError("inference is None — call create_posterior() first.")
-        assert self._tensor_dataset is not None
+        assert self.dataset is not None
 
         # Use a large representative batch for accurate z-score statistics
         # 10 samples (the previous value) gives wildly inaccurate mean/std
-        n_probe = min(100_000, self._tensor_dataset.tensors[0].shape[0])
-        sample_theta = self._tensor_dataset.tensors[0][:n_probe]
-        sample_x = self._tensor_dataset.tensors[1][:n_probe]
-        return cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
+        n_probe = min(100_000, len(self.dataset))
+        sample_theta, sample_x = self.dataset[:n_probe]
+        net = cast(nn.Module, self.inference._build_neural_net(sample_theta, sample_x))
+        # The 100k-row read sized the dataset's reusable buffers to 100k rows,
+        # and they only ever grow. Left attached they would be forked into
+        # every DataLoader worker for the rest of training.
+        self.dataset.release_buffers()
+        return net
 
     def _build_trainer(self, config: TrainingConfig) -> lightning.Trainer:
         """Construct a Lightning Trainer from *config*."""
-        acc, strat = select_accelerator_and_strategy(use_model_parallel=True)
+        acc, _strat = select_accelerator_and_strategy(use_model_parallel=False)
         tb_logger = (
             TensorBoardLogger(save_dir=str(config.tensorboard_dir))
             if config.tensorboard_dir
@@ -510,8 +546,66 @@ class InferenceHandler:
             gradient_clip_val=20.0,
             enable_progress_bar=config.show_progress,
             log_every_n_steps=50,
-            strategy=strat,
+            strategy="auto",
+            # BlockShuffleSampler already gives each rank a disjoint,
+            # equal-length share. Letting Lightning swap in a DistributedSampler
+            # would replace it and put us back on row-granular shuffling.
+            use_distributed_sampler=False,
             accelerator=acc,
             devices="auto",
-            num_nodes=int(os.environ.get("§URM_NNODES", 1)),
+            num_nodes=int(os.environ.get("SLURM_NNODES", 1)),
+            num_sanity_val_steps=0,
         )
+
+    def sample_posterior_chunked(
+        self,
+        num_samples_per_x: int,
+        x: list[float] | np.ndarray,
+        chunk_size: int = 500,
+        show_chunk_progress: bool = True,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Draw `num_samples_per_x` posterior sample(s) for each row of `x`,
+        processing `chunk_size` observations at a time so the rejection
+        sampler's internal (max_sampling_batch_size x n_conditions) broadcast
+        stays bounded regardless of how large `x` or `num_samples_per_x` are.
+
+        :returns: Tensor of shape ``(n_observations, num_samples_per_x, theta_dim)``,
+            or ``(n_observations, theta_dim)`` if ``num_samples_per_x == 1``.
+        """
+        x_arr = np.asarray(x)
+        n_obs = x_arr.shape[0]
+        kwargs.setdefault("show_progress_bars", False)
+
+        chunk_iter = range(0, n_obs, chunk_size)
+        if show_chunk_progress:
+            chunk_iter = tqdm(
+                chunk_iter,
+                desc=f"Sampling posterior in chunks of {chunk_size}",
+                total=(n_obs + chunk_size - 1) // chunk_size,
+            )
+
+        chunks = []
+        for start in chunk_iter:
+            end = min(start + chunk_size, n_obs)
+            x_chunk = x_arr[start:end]
+            samples_chunk = self.sample_posterior(
+                num_samples_per_x, x=x_chunk, **kwargs
+            ).cpu()
+            # shape (num_samples_per_x, chunk_len, theta_dim)
+            chunks.append(samples_chunk)
+            if self.device_handler.device == "cuda":
+                torch.cuda.empty_cache()
+
+        # Reassemble the full observation axis (was split across chunks on dim=1)
+        samples = torch.cat(chunks, dim=1)  # (num_samples_per_x, n_obs, theta_dim)
+
+        # (n_obs, num_samples_per_x, theta_dim) is the more natural layout —
+        # matches thetas/xs indexing by observation.
+        samples = samples.permute(1, 0, 2)
+
+        if num_samples_per_x == 1:
+            samples = samples.squeeze(1)  # (n_obs, theta_dim), for LC2ST-style calls
+
+        return samples

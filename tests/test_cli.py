@@ -198,7 +198,6 @@ def test_train_runs(mock_handler_cls, runner, tmp_files):
     assert result.exit_code == 0, result.output
     h = mock_handler_cls.return_value
     h.set_dataset.assert_called_once()
-    h.load_training_data.assert_called_once()
     h.create_posterior.assert_called_once()
     h.train_posterior.assert_called_once()
 

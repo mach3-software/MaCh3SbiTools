@@ -1,9 +1,9 @@
 """Train application module."""
 
-import os
 import warnings
 from pathlib import Path
 
+import click
 import torch
 
 from mach3sbitools.inference import InferenceHandler
@@ -33,6 +33,9 @@ def train_module(
     stop_after_epochs: int,
     validation_fraction: float,
     num_workers: int,
+    prefetch_factor: int,
+    shuffle_block_size: int,
+    val_batch_multiplier: int,
     autosave_every: int,
     resume_checkpoint: Path | None,
     use_amp: bool,
@@ -44,8 +47,8 @@ def train_module(
     prune_model: float | None,
     compress_x: bool,
     compress_theta: bool,
-    compress_x_components: int,
-    compress_theta_components: int,
+    compress_x_components: int | None,
+    compress_theta_components: int | None,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -74,6 +77,18 @@ def train_module(
     """
     logger = get_logger()
 
+    # Checked before any expensive setup so a usage error surfaces immediately
+    # rather than after the prior and dataset have been opened. Skipped when
+    # resuming, where the architecture flags are read from the checkpoint and
+    # any passed here are ignored.
+    if not resume_checkpoint:
+        if compress_theta and compress_theta_components is None:
+            raise click.UsageError(
+                "--compress_theta requires --compress_theta_components N"
+            )
+        if compress_x and compress_x_components is None:
+            raise click.UsageError("--compress_x requires --compress_x_components N")
+
     save_file = Path(save_file)
     save_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -85,6 +100,9 @@ def train_module(
         stop_after_epochs=stop_after_epochs,
         validation_fraction=validation_fraction,
         num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        shuffle_block_size=shuffle_block_size,
+        val_batch_multiplier=val_batch_multiplier,
         autosave_every=autosave_every,
         resume_checkpoint=Path(resume_checkpoint) if resume_checkpoint else None,
         use_amp=use_amp,
@@ -100,9 +118,7 @@ def train_module(
     # Dataset loading is always required — shared CPU tensor, single load.
     handler = InferenceHandler(Path(prior_path))
     handler.set_dataset(Path(dataset))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     # All ranks must wait for rank 0 to finish loading before proceeding.
-    handler.load_training_data(local_rank == 0)
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()
 

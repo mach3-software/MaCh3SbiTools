@@ -14,7 +14,9 @@ from torch.distributed.checkpoint.state_dict import (
 )
 
 from mach3sbitools.data_processors import CompressorBase
-from mach3sbitools.utils import PosteriorConfig, TrainingConfig
+from mach3sbitools.utils import PosteriorConfig, TrainingConfig, get_logger
+
+logger = get_logger()
 
 _EXPENSIVE_LOG_EVERY_N_EPOCHS = 10
 
@@ -70,11 +72,19 @@ class SBILightningModule(L.LightningModule):
         """
         super().__init__()
         self.model = density_estimator
+        self.loss_fn = density_estimator.loss
         self.config = config
         self.model_config = model_config
         # Needed for scheduling
         self.lr = config.learning_rate
-        self.save_hyperparameters(ignore=["density_estimator"])
+        # The compressors are persisted as plain state dicts in
+        # on_save_checkpoint. Letting save_hyperparameters also stash the live
+        # objects puts arbitrary classes in the checkpoint, which
+        # torch.load(weights_only=True) -- Lightning's default on resume --
+        # refuses to unpickle, so resuming a compressed run would fail.
+        self.save_hyperparameters(
+            ignore=["density_estimator", "x_compressor", "theta_compressor"]
+        )
 
         # EMA state
         self.ema_val_loss: float = float("inf")
@@ -86,6 +96,9 @@ class SBILightningModule(L.LightningModule):
         # Throughput state
         self._epoch_start_time: float = 0.0
         self._train_samples_seen: int = 0
+
+        # Reset each epoch; see on_before_optimizer_step.
+        self._grad_norms_logged_this_epoch: bool = False
 
         self._x_compressor = x_compressor
         self._theta_compressor = theta_compressor
@@ -121,6 +134,7 @@ class SBILightningModule(L.LightningModule):
         """Record epoch start time and reset sample counter."""
         self._epoch_start_time = time.perf_counter()
         self._train_samples_seen = 0
+        self._grad_norms_logged_this_epoch = False
 
     def training_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int):
         """
@@ -131,25 +145,30 @@ class SBILightningModule(L.LightningModule):
         :returns: Scalar mean loss.
         """
         theta, x = batch
-        loss_per_sample = self.model.loss(theta, x)
+        # loss_fn, not model.loss: _fit() may have replaced it with a
+        # torch.compile'd version, which model.loss would bypass.
+        loss_per_sample = self.loss_fn(theta, x)
         loss = loss_per_sample.mean()
 
         self._train_samples_seen += theta.shape[0]
 
+        # sync_dist on a per-step log is a collective on every step. The
+        # epoch-level aggregate below is reduced once instead; the per-step
+        # trace stays rank-local, which is all it is used for.
         self.log(
             "train/loss",
             loss,
             on_step=True,
             on_epoch=True,
             prog_bar=True,
-            sync_dist=True,
+            sync_dist=False,
         )
         self.log(
             "train/loss_std",
             loss_per_sample.std(),
             on_step=True,
             on_epoch=False,
-            sync_dist=True,
+            sync_dist=False,
         )
         return loss
 
@@ -201,11 +220,19 @@ class SBILightningModule(L.LightningModule):
             self.log("train/param_norm", total_param_norm_sq**0.5, sync_dist=False)
 
     def on_before_optimizer_step(self, optimizer) -> None:
+        # Every .item() below is a blocking GPU->CPU sync, and there is one
+        # per parameter tensor. Running that on every step drains the
+        # pipeline hundreds of times per step and dominates wall time once
+        # the batch size is small enough to give a high step count -- so
+        # sample it once per epoch rather than once per step.
         if (
             self.current_epoch % _EXPENSIVE_LOG_EVERY_N_EPOCHS != 0
+            or self._grad_norms_logged_this_epoch
             or not self.trainer.is_global_zero
         ):
             return
+
+        self._grad_norms_logged_this_epoch = True
 
         total_grad_norm_sq = 0.0
         for name, p in self.model.named_parameters():
@@ -229,7 +256,7 @@ class SBILightningModule(L.LightningModule):
         :returns: Scalar mean loss.
         """
         theta, x = batch
-        loss_per_sample = self.model.loss(theta, x)
+        loss_per_sample = self.loss_fn(theta, x)
         loss = loss_per_sample.mean()
 
         self.log(
@@ -324,6 +351,10 @@ class SBILightningModule(L.LightningModule):
         checkpoint["model_config"] = self.model_config
         checkpoint["epoch"] = self.current_epoch
 
+        checkpoint["ema_val_loss"] = self.ema_val_loss
+        checkpoint["prev_val_loss"] = self._prev_val_loss
+        checkpoint["prev_ema_loss"] = self._prev_ema_loss
+
         # Lets us load everything from a single checkpoint
         checkpoint["theta_dim"] = self.model.input_shape[0]
         checkpoint["theta_compressor"] = (
@@ -334,3 +365,11 @@ class SBILightningModule(L.LightningModule):
         checkpoint["x_compressor"] = (
             self._x_compressor.state_dict() if self._x_compressor else None
         )
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Restore EMA/diagnostics state saved by on_save_checkpoint."""
+        if "ema_val_loss" not in checkpoint:
+            logger.warning("Checkpoint predates EMA-state saving; cold-starting EMA.")
+        self.ema_val_loss = checkpoint.get("ema_val_loss", float("inf"))
+        self._prev_val_loss = checkpoint.get("prev_val_loss", float("inf"))
+        self._prev_ema_loss = checkpoint.get("prev_ema_loss", float("inf"))

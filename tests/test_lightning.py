@@ -7,6 +7,7 @@ Covers:
   - InferenceHandler.train_posterior — Lightning path
 """
 
+import itertools
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,9 +15,9 @@ import lightning as L
 import pytest
 import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset
 
-from mach3sbitools.data_loaders import SBIDataModule
+from mach3sbitools.data_loaders import BlockShuffleSampler, SBIDataModule
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.inference.lightning_module import SBILightningModule
 from mach3sbitools.utils.config import TrainingConfig
@@ -183,19 +184,62 @@ class TestSBIDataModule:
         dm.setup()
         loader = dm.train_dataloader()
         assert isinstance(loader, DataLoader)
-        assert isinstance(loader.sampler, RandomSampler)
         assert loader.drop_last is True
         assert loader.batch_size == 16
         assert loader.num_workers == 0
 
+        # Ordering comes from BlockShuffleSampler, not RandomSampler: assert
+        # the behaviour (order varies between epochs, indices are not a plain
+        # arange) rather than the class.
+        sampler = loader.sampler
+        assert isinstance(sampler, BlockShuffleSampler)
+        sampler.set_epoch(0)
+        first = list(sampler)
+        sampler.set_epoch(1)
+        second = list(sampler)
+        assert first != second, "epochs must differ"
+        assert sorted(first) == sorted(second), "epochs must cover the same rows"
+        assert first != sorted(first), "training order must not be sequential"
+
+    def test_train_dataloader_reads_contiguous_blocks(self, tmp_path):
+        """
+        The point of block shuffling: batches are decorrelated, but each
+        batch still resolves to a handful of contiguous reads rather than one
+        read per row. A regression here silently turns a compute-bound run
+        back into an input-bound one.
+        """
+        cfg = _minimal_config(tmp_path)
+        cfg.batch_size = 64
+        cfg.shuffle_block_size = 8
+        dm = SBIDataModule(DummyDataSet(n=4096), cfg)
+        dm.setup()
+        sampler = dm.train_dataloader().sampler
+        sampler.set_epoch(0)
+        batch = sorted(list(sampler)[:64])
+
+        runs = 1
+        for prev, nxt in itertools.pairwise(batch):
+            if nxt != prev + 1:
+                runs += 1
+        assert runs <= 64 // cfg.shuffle_block_size, (
+            f"{runs} reads for a 64-row batch at block_size="
+            f"{cfg.shuffle_block_size}; blocks are being split"
+        )
+
     def test_val_dataloader_properties(self, tmp_path):
         """Val loader should not shuffle and use zero workers."""
-        dm = SBIDataModule(DummyDataSet(), _minimal_config(tmp_path))
+        cfg = _minimal_config(tmp_path)
+        dm = SBIDataModule(DummyDataSet(), cfg)
         dm.setup()
         loader = dm.val_dataloader()
         assert isinstance(loader, DataLoader)
-        assert isinstance(loader.sampler, SequentialSampler)
         assert loader.num_workers == 0
+        # Not a SequentialSampler any more, but it must still yield rows in
+        # order -- validation loss should not depend on batch composition.
+        order = list(loader.sampler)
+        assert order == sorted(order) == list(range(len(order)))
+        # Validation is no-grad, so it runs at a multiple of the train batch.
+        assert loader.batch_size == cfg.batch_size * cfg.val_batch_multiplier
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,17 +305,17 @@ class TestInferenceHandlerLightning:
         # No tensor dataset
         handler = InferenceHandler(prior_save)
         handler.create_posterior(posterior_config)
-        with pytest.raises(ValueError, match="load_training_data"):
+        with pytest.raises(ValueError, match="set_dataset"):
             handler.train_posterior(training_config)
 
         # No inference object
         handler2 = InferenceHandler(prior_save)
-        handler2._tensor_dataset = TensorDataset(torch.zeros(10, 4), torch.zeros(10, 6))
+        handler2.dataset = MagicMock()
         with pytest.raises(ValueError, match="create_posterior"):
             handler2.train_posterior(training_config)
 
     def test_train_posterior_sets_density_estimator_in_eval_mode(
-        self, prior_save, dummy_data_dir, posterior_config, tmp_path
+        self, prior_save, merged_data_dir, posterior_config, tmp_path
     ):
         cfg = TrainingConfig(
             save_path=tmp_path / "model.ckpt",
@@ -282,8 +326,7 @@ class TestInferenceHandlerLightning:
             autosave_every=500,
         )
         handler = InferenceHandler(prior_save)
-        handler.set_dataset(dummy_data_dir)
-        handler.load_training_data()
+        handler.set_dataset(merged_data_dir)
         handler.create_posterior(posterior_config)
         handler.train_posterior(cfg, model_config=posterior_config)
 
@@ -291,12 +334,11 @@ class TestInferenceHandlerLightning:
         assert not handler._density_estimator.training
 
     def test_slurm_nnodes_env_respected(
-        self, prior_save, dummy_data_dir, posterior_config, tmp_path, monkeypatch
+        self, prior_save, merged_data_dir, posterior_config, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("SLURM_NNODES", "1")
         handler = InferenceHandler(prior_save)
-        handler.set_dataset(dummy_data_dir)
-        handler.load_training_data()
+        handler.set_dataset(merged_data_dir)
         handler.create_posterior(posterior_config)
 
         cfg = TrainingConfig(

@@ -15,7 +15,6 @@ import torch
 from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
 from scipy import stats
-from torch.utils.data import TensorDataset
 
 from mach3sbitools.inference import InferenceHandler
 from mach3sbitools.simulator import load_prior
@@ -41,10 +40,9 @@ def nominal_observation(simulator_injector):
 
 
 @pytest.fixture(scope="session")
-def trained_handler(prior_save, dummy_data_dir, posterior_config, training_config):
+def trained_handler(prior_save, merged_data_dir, posterior_config, training_config):
     handler = InferenceHandler(prior_save)
-    handler.set_dataset(dummy_data_dir)
-    handler.load_training_data()
+    handler.set_dataset(merged_data_dir)
     handler.create_posterior(posterior_config)
     handler.train_posterior(training_config)
     return handler
@@ -62,21 +60,22 @@ def samples(trained_handler, nominal_observation):
 
 @pytest.mark.slow
 class TestInferenceHandlerErrorPaths:
-    def test_load_training_data_requires_dataset(self, prior_save):
-        with pytest.raises(ValueError):
-            InferenceHandler(prior_save).load_training_data()
+    def test_set_dataset_requires_merged_npy_files(self, prior_save, dummy_data_dir):
+        # Unmerged feather shards only -- no theta.npy / x.npy
+        with pytest.raises(FileNotFoundError, match=r"x\.npy"):
+            InferenceHandler(prior_save).set_dataset(dummy_data_dir)
 
-    def test_train_posterior_requires_tensor_dataset(
+    def test_train_posterior_requires_dataset(
         self, prior_save, posterior_config, training_config
     ):
         handler = InferenceHandler(prior_save)
         handler.create_posterior(posterior_config)
-        with pytest.raises(ValueError, match="load_training_data"):
+        with pytest.raises(ValueError, match="set_dataset"):
             handler.train_posterior(training_config)
 
     def test_train_posterior_requires_inference(self, prior_save, training_config):
         handler = InferenceHandler(prior_save)
-        handler._tensor_dataset = TensorDataset(torch.zeros(10, 4), torch.zeros(10, 6))
+        handler.dataset = MagicMock()
         with pytest.raises(ValueError, match="create_posterior"):
             handler.train_posterior(training_config)
 
@@ -112,13 +111,11 @@ class TestInferenceHandlerErrorPaths:
 
 @pytest.mark.slow
 class TestInferenceHandlerHappyPath:
-    def test_full_lifecycle_setup(self, prior_save, dummy_data_dir, posterior_config):
+    def test_full_lifecycle_setup(self, prior_save, merged_data_dir, posterior_config):
         """Each lifecycle step should leave the handler in the expected state."""
         handler = InferenceHandler(prior_save)
-        handler.set_dataset(dummy_data_dir)
+        handler.set_dataset(merged_data_dir)
         assert handler.dataset is not None
-        handler.load_training_data()
-        assert handler._tensor_dataset is not None
         handler.create_posterior(posterior_config)
         assert handler.inference is not None
 
@@ -171,8 +168,8 @@ class TestInferenceHandlerCheckpoints:
         ckpt_path = tmp_path / "de.pt"
         torch.save(trained_handler._density_estimator.state_dict(), ckpt_path)
 
-        theta_dim = trained_handler._tensor_dataset.tensors[0].shape[1]
-        x_dim = trained_handler._tensor_dataset.tensors[1].shape[1]
+        theta, x = trained_handler.dataset[0]
+        theta_dim, x_dim = theta.shape[-1], x.shape[-1]
 
         loaded = InferenceHandler(prior_save)
         loaded.create_posterior(posterior_config)

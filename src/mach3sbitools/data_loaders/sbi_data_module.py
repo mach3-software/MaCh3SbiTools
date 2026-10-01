@@ -8,9 +8,12 @@ memory-mapped, lazily-loading dataset such as
 :class:`~mach3sbitools.data_loaders.LazyFeatherDataset` — rather than
 requiring a pre-loaded, fully in-RAM ``TensorDataset``.
 
-* Under DDP, Lightning's built-in ``DistributedSampler`` (activated
-  automatically when ``strategy="ddp"``) still gives each rank a disjoint
-  slice of indices, so every GPU only touches its own share of rows.
+* Ordering comes from
+  :class:`~mach3sbitools.data_loaders.BlockShuffleSampler`, which shuffles
+  contiguous blocks rather than rows and partitions blocks across DDP ranks
+  itself. The Trainer therefore sets ``use_distributed_sampler=False``; if
+  that is ever flipped back on, Lightning replaces this sampler with a
+  ``DistributedSampler`` and row-granular access returns.
 * When the dataset is backed by memory-mapped, uncompressed feather files,
   ranks on the same node share the OS page cache: identical pages aren't
   duplicated in physical RAM even though each rank/worker opens its own
@@ -38,8 +41,10 @@ from typing import cast
 
 import lightning as L
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
+from torch.utils.data._utils.collate import default_collate
 
+from mach3sbitools.data_loaders.block_sampler import BlockShuffleSampler
 from mach3sbitools.utils.config import TrainingConfig
 
 warnings.filterwarnings(
@@ -54,6 +59,22 @@ warnings.filterwarnings(
 )
 
 
+def _collate_batched(batch):
+    """
+    Pass through batches that the dataset already collated.
+
+    ``TrainingDataset.__getitems__`` returns ``(theta, x)`` as stacked
+    tensors, so there is nothing left to do. Falling back to
+    ``default_collate`` keeps this working for any dataset that yields plain
+    per-row samples instead (e.g. a ``TensorDataset``).
+
+    Defined at module scope so it survives pickling to spawned workers.
+    """
+    if isinstance(batch, tuple) and len(batch) == 2 and torch.is_tensor(batch[0]):
+        return batch
+    return default_collate(batch)
+
+
 class SBIDataModule(L.LightningDataModule):
     """
     Lightning data module over a ``(theta, x)`` map-style dataset.
@@ -64,14 +85,10 @@ class SBIDataModule(L.LightningDataModule):
     or a pre-loaded :class:`~torch.utils.data.TensorDataset` for small
     datasets.
 
-    Under DDP, Lightning automatically wraps each DataLoader's sampler in a
-    ``DistributedSampler``, which partitions the index space across ranks.
-
-    .. note::
-
-        The random split uses a fixed seed of ``42`` so that all DDP ranks
-        produce identical train / validation index sets.  If you change this
-        seed, change it consistently across all ranks.
+    Train/validation is a deterministic contiguous split -- the first
+    ``1 - validation_fraction`` of rows train, the tail validates -- so every
+    rank derives identical index sets without needing to agree on a seed.
+    Decorrelation is the sampler's job, not the split's.
     """
 
     def __init__(self, dataset: Dataset, config: TrainingConfig) -> None:
@@ -106,10 +123,14 @@ class SBIDataModule(L.LightningDataModule):
         n_total = len(cast(Sized, self.dataset))
         n_val = int(n_total * self.config.validation_fraction)
         n_train = n_total - n_val
-        self.train_dataset, self.val_dataset = random_split(
-            self.dataset,
-            [n_train, n_val],
-            generator=torch.Generator().manual_seed(42),
+
+        # `range`, not `torch.arange`: Subset.__getitems__ evaluates
+        # `self.indices[i]` once per row per batch, and a tensor returns a
+        # 0-d tensor there rather than an int -- thousands of tiny tensor
+        # allocations per batch before a single byte is read.
+        self.train_dataset = torch.utils.data.Subset(self.dataset, range(n_train))
+        self.val_dataset = torch.utils.data.Subset(
+            self.dataset, range(n_train, n_total)
         )
 
     def _make_dataloader(
@@ -122,15 +143,27 @@ class SBIDataModule(L.LightningDataModule):
     ) -> DataLoader:
         """Shared factory to avoid duplicating DataLoader kwargs."""
         use_workers = self.config.num_workers > 0
+        sampler = BlockShuffleSampler(
+            len(cast(Sized, dataset)),
+            block_size=self.config.shuffle_block_size,
+            shuffle=shuffle,
+            seed=self.config.shuffle_seed,
+        )
         return DataLoader(
             dataset,
             batch_size=self.config.batch_size * batch_multiplier,
-            shuffle=shuffle,
+            # `sampler` and `shuffle` are mutually exclusive in DataLoader;
+            # the sampler owns ordering now.
+            sampler=sampler,
             drop_last=drop_last,
             num_workers=self.config.num_workers,
             pin_memory=True,
             persistent_workers=use_workers,
-            prefetch_factor=5 if use_workers else None,
+            # Staged bytes are num_workers x prefetch_factor x batch_size x
+            # row_bytes, all of it pinned. Large values here are a common
+            # cause of host OOM at big batch sizes.
+            prefetch_factor=self.config.prefetch_factor if use_workers else None,
+            collate_fn=_collate_batched,
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -147,6 +180,11 @@ class SBIDataModule(L.LightningDataModule):
         """
         if self.val_dataset is None:
             raise RuntimeError("Validation set has not been set; call setup() first.")
+        # Validation runs under no_grad, so activations are not kept and a
+        # much larger batch costs nothing in memory while cutting the number
+        # of round trips through the loader.
         return self._make_dataloader(
-            self.val_dataset, shuffle=False, batch_multiplier=4
+            self.val_dataset,
+            shuffle=False,
+            batch_multiplier=self.config.val_batch_multiplier,
         )

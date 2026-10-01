@@ -16,6 +16,13 @@ class TruncatedGaussianDistribution(MultivariateNormal):
     tails (inverse-Jacobian issues) and preserving the true covariance matrix.
     """
 
+    # Both are set by MultivariateNormal.__init__, but ``to()`` reassigns them
+    # from their own current value. Without a declaration a type checker has
+    # only that self-referential assignment to work from and cannot resolve
+    # the type. Bare annotations, so no class attribute is created at runtime.
+    loc: torch.Tensor
+    _unbroadcasted_scale_tril: torch.Tensor
+
     def __init__(
         self,
         mean: torch.Tensor,
@@ -153,3 +160,20 @@ class TruncatedGaussianDistribution(MultivariateNormal):
         Note: The Scipy sampling path is not strictly differentiable.
         """
         return self.sample(sample_shape)
+
+    def to(self, device: torch.device | str) -> "TruncatedGaussianDistribution":
+        """
+        Move cached tensors to *device* in-place.
+
+        The numpy caches (``_L_np``, ``_mean_np``, ``_lower_np``, ``_upper_np``)
+        are device-independent (numpy has no notion of device) and only need
+        refreshing if you also want ``self.loc``/``self.scale_tril`` on the
+        new device for anything that calls the parent ``MultivariateNormal``
+        methods (e.g. ``log_prob``'s ``super().log_prob`` inside ``in_bounds``).
+        """
+        device = torch.device(device)
+        self._lower_bounds = self._lower_bounds.to(device)
+        self._upper_bounds = self._upper_bounds.to(device)
+        self.loc = self.loc.to(device)
+        self._unbroadcasted_scale_tril = self._unbroadcasted_scale_tril.to(device)
+        return self

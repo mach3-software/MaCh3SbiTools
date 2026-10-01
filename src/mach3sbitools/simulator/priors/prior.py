@@ -47,11 +47,6 @@ logger = get_logger()
 class MaskDistributionMap:
     """
     Associates a boolean parameter mask with its distribution.
-
-    :param mask: Boolean tensor of shape ``(n_params,)`` selecting the
-        parameters governed by *distribution*.
-    :param distribution: The :class:`torch.distributions.Distribution`
-        for the selected parameters.
     """
 
     mask: torch.Tensor
@@ -59,14 +54,28 @@ class MaskDistributionMap:
 
     def to(self, device: torch.device | str) -> "MaskDistributionMap":
         """
-        Move *mask* to *device* (distribution tensors are not moved).
+        Move *mask* and *distribution* to *device*.
 
-        :param device: Target PyTorch device.
-        :returns: New :class:`MaskDistributionMap` with mask on *device*.
+        Custom distributions (Cyclical/FlippedUniform/TruncatedGaussian)
+        implement their own ``to()``. ``torch.distributions.Uniform`` (used
+        for flat priors) does NOT implement ``to()`` — it's a plain
+        Distribution, not an nn.Module — so it must be rebuilt explicitly
+        or it silently stays on its original device.
         """
-        return MaskDistributionMap(
-            mask=self.mask.to(device), distribution=self.distribution
-        )
+        dist = self.distribution
+
+        if hasattr(dist, "to") and callable(getattr(dist, "to")):
+            dist = dist.to(device)
+        elif isinstance(dist, Uniform):
+            dist = Uniform(dist.low.to(device), dist.high.to(device))
+        else:
+            raise TypeError(
+                f"Don't know how to move distribution of type "
+                f"{type(dist).__name__} to device {device}. "
+                f"Add a .to() method or handle it explicitly here."
+            )
+
+        return MaskDistributionMap(mask=self.mask.to(device), distribution=dist)
 
 
 class Prior(torch.distributions.Distribution):
@@ -445,11 +454,13 @@ class Prior(torch.distributions.Distribution):
         :param device: Target PyTorch device.
         :returns: ``self``, for chaining.
         """
+        self.device_handler = TorchDeviceHandler()
         self._prior_data = self._prior_data.to(device)
         for i, mask_map in enumerate(self._priors):
             self._priors[i] = mask_map.to(device)
         self.nuisance_filter = self.nuisance_filter.to(device)
         self._flipped_mask = self._flipped_mask.to(device)
+
         return self
 
 

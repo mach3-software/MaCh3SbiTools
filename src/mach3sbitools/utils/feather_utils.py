@@ -6,11 +6,10 @@ lazily; compressed feather files must be fully decompressed on open.
 """
 
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 import numpy as np
 import pyarrow as pa
-import torch
 from pyarrow import Table, feather, ipc, memory_map
 
 from mach3sbitools.types import SimulatorData, SimulatorDataGrouped
@@ -23,9 +22,7 @@ class FeatherOutput(TypedDict):
     theta: SimulatorData
 
 
-def from_feather(
-    file_name: Path, nuisance_filter: torch.Tensor | np.ndarray | None = None
-) -> SimulatorDataGrouped:
+def from_feather(file_name: Path) -> SimulatorDataGrouped:
     """
     Load a ``(theta, x)`` pair from a feather file.
 
@@ -45,11 +42,6 @@ def from_feather(
         table = ipc.open_file(source).read_all()
         theta = _column_to_2d(table["theta"]).astype(np.float32, copy=True)
         x = _column_to_2d(table["x"]).astype(np.float32, copy=True)
-
-    if nuisance_filter is not None:
-        if isinstance(nuisance_filter, torch.Tensor):
-            nuisance_filter = nuisance_filter.to("cpu").numpy()
-        theta = theta[:, nuisance_filter]
 
     return theta, x
 
@@ -88,7 +80,7 @@ def peek_num_rows(file_name: Path) -> int:
         file_name = Path(file_name)
 
     with memory_map(str(file_name), "r") as source:
-        return int(ipc.open_file(source).read_all().num_rows)
+        return cast(int, ipc.open_file(source).read_all().num_rows)
 
 
 def _column_to_2d(column: pa.ChunkedArray) -> np.ndarray:
@@ -118,7 +110,7 @@ class FeatherFileHandle:
 
     @property
     def num_rows(self) -> int:
-        return int(self.theta.shape[0])
+        return cast(int, self.theta.shape[0])
 
     def close(self) -> None:
         self._source.close()

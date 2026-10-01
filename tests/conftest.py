@@ -5,6 +5,7 @@ from typing import cast
 import numpy as np
 import pytest
 
+from mach3sbitools.apps.merge_shards import merge_shards_module
 from mach3sbitools.simulator import create_prior
 from mach3sbitools.simulator.simulator_injector import get_simulator
 from mach3sbitools.types import SimulatorData
@@ -74,6 +75,14 @@ def dummy_data_dir(tmp_path_factory, test_consts) -> Path:
     data_folder: Path = tmp_path_factory.mktemp("data")
     generate_data(data_folder, test_consts)
     return data_folder
+
+
+@pytest.fixture(scope="session")
+def merged_data_dir(tmp_path_factory, dummy_data_dir) -> Path:
+    """The feather shards in ``dummy_data_dir`` merged into theta.npy / x.npy."""
+    merged_folder: Path = tmp_path_factory.mktemp("merged")
+    merge_shards_module(dummy_data_dir, merged_folder)
+    return merged_folder
 
 
 @pytest.fixture(scope="session")

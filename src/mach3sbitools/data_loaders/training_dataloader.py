@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 from pathlib import Path
@@ -27,7 +28,13 @@ _COALESCE_GAP_BYTES = 256 * 1024
 
 
 class TrainingDataset(Dataset):
-    def __init__(self, theta_path: Path, x_path: Path, prior: Prior):
+    def __init__(
+        self,
+        theta_path: Path,
+        x_path: Path,
+        prior: Prior,
+        x_bin_range: list[tuple[int, int]] | None,
+    ):
         self.theta_path = theta_path
         self.x_path = x_path
 
@@ -61,6 +68,9 @@ class TrainingDataset(Dataset):
         self._theta_buf: np.ndarray | None = None
         self._x_buf: np.ndarray | None = None
 
+        if x_bin_range is not None:
+            self._assert_disjoint(x_bin_range)
+        self._x_mask = self._build_x_filter(x_bin_range)
         self._nuisance_filter = prior.nuisance_filter.cpu().bool()
         self._n_full = int(self._nuisance_filter.numel())
         self._n_kept = int(self._nuisance_filter.sum())
@@ -358,6 +368,46 @@ class TrainingDataset(Dataset):
         self._theta_buf = None
         self._x_buf = None
 
+    def _assert_disjoint(self, list_to_check):
+        """Assert the half-open ranges [s, e) in l don't overlap."""
+        ranges = sorted(list_to_check)
+        assert all(s < e for s, e in ranges), f"Empty or reversed range in {ranges}"
+        for (s0, e0), (s1, e1) in itertools.pairwise(ranges):
+            assert s1 >= e0, f"Ranges ({s0}, {e0}) and ({s1}, {e1}) overlap"
+
+    def _build_x_filter(
+        self, x_bin_range: list[tuple[int, int]] | None
+    ) -> torch.Tensor | None:
+        """
+        Build a boolean column mask selecting the half-open bin ranges
+        [s, e) in *x_bin_range*. Returns ``None`` when no ranges are given.
+        """
+        if x_bin_range is None:
+            return None
+
+        n_cols = self._x_meta["shape"][1]
+        r = torch.as_tensor(x_bin_range, dtype=torch.long).reshape(-1, 2)
+
+        if not (r[:, 0] < r[:, 1]).all():
+            raise ValueError(f"Empty or reversed range in {x_bin_range}")
+        if r.min() < 0 or r[:, 1].max() > n_cols:
+            raise ValueError(
+                f"x_bin_range {x_bin_range} exceeds x width of {n_cols} columns"
+            )
+
+        cols = torch.arange(n_cols)
+        in_range = (cols >= r[:, :1]) & (cols < r[:, 1:])  # (n_ranges, n_cols)
+        if (in_range.sum(0) > 1).any():
+            raise ValueError(f"Overlapping ranges in x_bin_range {x_bin_range}")
+
+        return in_range.any(0)
+
+    def _filter_x(self, x: torch.Tensor) -> torch.Tensor:
+        """Keep only the x-bins selected by x_bin_range. No-op without one."""
+        if self._x_mask is None:
+            return x
+        return x[..., self._x_mask]
+
     def _filter_theta(self, theta: torch.Tensor) -> torch.Tensor:
         """
         Apply the nuisance filter along the last axis.
@@ -429,7 +479,7 @@ class TrainingDataset(Dataset):
         # .copy() because _read_rows may hand back a view of the reused
         # buffer, which the next batch would overwrite underneath us.
         theta_batch = self._filter_theta(torch.from_numpy(theta_np.copy()).float())
-        x_batch = torch.from_numpy(x_np.copy()).float()
+        x_batch = self._filter_x(torch.from_numpy(x_np.copy()).float())
 
         return self._compress(theta_batch, x_batch)
 
@@ -439,10 +489,10 @@ class TrainingDataset(Dataset):
             indices = list(range(*idx.indices(self._len)))
             theta_np, x_np = self._read_rows(indices)
             theta = self._filter_theta(torch.from_numpy(theta_np.copy()).float())
-            x = torch.from_numpy(x_np.copy()).float()
+            x = self._filter_x(torch.from_numpy(x_np.copy()).float())
             return self._compress(theta, x)
 
         theta_np, x_np = self._read_rows([int(idx)])
         theta = self._filter_theta(torch.from_numpy(theta_np[0].copy()).float())
-        x = torch.from_numpy(x_np[0].copy()).float()
+        x = self._filter_x(torch.from_numpy(x_np[0].copy()).float())
         return self._compress(theta, x)

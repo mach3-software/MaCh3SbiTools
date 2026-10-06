@@ -417,6 +417,12 @@ def save_data(
     type=int,
     help="How many components to compress theta down to",
 )
+@optgroup.option(
+    "--select_x_bins",
+    type=(int, int),
+    multiple=True,
+    help="Select x bins to include in the simulation",
+)
 # Checkpointing & logging
 @optgroup.group("Checkpointing & Logging")
 @optgroup.option(
@@ -483,6 +489,7 @@ def train(
     compress_theta: bool,
     compress_x_components: int | None,
     compress_theta_components: int | None,
+    x_bin_range: list[tuple[int, int]] | None,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -535,6 +542,7 @@ def train(
         compress_theta,
         compress_x_components,
         compress_theta_components,
+        x_bin_range,
     )
 
 

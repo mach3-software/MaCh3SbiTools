@@ -98,7 +98,9 @@ class InferenceHandler:
         self._theta_compressor: CompressorBase | None = None
         self._x_compressor: CompressorBase | None = None
 
-    def set_dataset(self, data_folder: Path) -> None:
+    def set_dataset(
+        self, data_folder: Path, x_bin_range: list[tuple[int, int]] | None = None
+    ) -> None:
         """
         Point the handler at a folder of ``.feather`` simulation files.
 
@@ -114,7 +116,7 @@ class InferenceHandler:
         if not theta_data.is_file():
             raise FileNotFoundError(f"Cannot find theta data file: {theta_data}")
 
-        self.dataset = TrainingDataset(theta_data, x_data, self.prior)
+        self.dataset = TrainingDataset(theta_data, x_data, self.prior, x_bin_range)
         logger.info(
             f"Dataset set: [bold]{len(self.dataset)}[/] files in [cyan]{data_folder}[/]"
         )

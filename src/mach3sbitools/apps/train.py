@@ -49,6 +49,7 @@ def train_module(
     compress_theta: bool,
     compress_x_components: int | None,
     compress_theta_components: int | None,
+    x_bin_range: list[tuple[int, int]] | None,
 ) -> None:
     """Train a Neural Posterior Estimation (NPE) density estimator.
 
@@ -117,7 +118,7 @@ def train_module(
 
     # Dataset loading is always required — shared CPU tensor, single load.
     handler = InferenceHandler(Path(prior_path))
-    handler.set_dataset(Path(dataset))
+    handler.set_dataset(Path(dataset), x_bin_range)
     # All ranks must wait for rank 0 to finish loading before proceeding.
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.barrier()

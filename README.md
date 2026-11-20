@@ -1,6 +1,6 @@
 # <img src="docs/_static/mach3sbi_logo.png" alt="MaCh3" align="center" width="100"/> `MaCh3 SBI Tools` Simulation Based Inference with Neutrinos
 
-[![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
 [![codecov](https://codecov.io/github/mach3-software/MaCh3SbiTools/graph/badge.svg?token=cyn4uoEdO9)](https://codecov.io/github/mach3-software/MaCh3SbiTools)
 [![Code - Documented](https://img.shields.io/badge/Code-Documented-2ea44f)](https://mach3-software.github.io/MaCh3SbiTools)
 [![unit-test](https://github.com/mach3-software/MaCh3SbiTools/actions/workflows/pytest.yml/badge.svg)](https://github.com/mach3-software/MaCh3SbiTools/actions/workflows/pytest.yml)
